@@ -913,13 +913,6 @@ a {
     color: var(--green-dark);
   }
 
-  .mobile-tabbar a:nth-child(2),
-  .mobile-tabbar a:nth-child(3),
-  .mobile-tabbar a:nth-child(6),
-  .mobile-tabbar a:nth-child(8) {
-    display: none;
-  }
-
   label,
   section,
   article,
