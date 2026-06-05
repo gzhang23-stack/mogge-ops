@@ -40,11 +40,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
         </div>
         <div className="nav-flow">
-          <span>监控</span>
-          <span>选题</span>
-          <span>写作</span>
-          <span>审核</span>
-          <span>复盘</span>
+          <Link href="/monitors">监控</Link>
+          <Link href="/topics">选题</Link>
+          <Link href="/workspace">写作</Link>
+          <Link href="/reviews">审核</Link>
+          <Link href="/reports">复盘</Link>
         </div>
         <nav className="nav">
           {nav.map((item) => {

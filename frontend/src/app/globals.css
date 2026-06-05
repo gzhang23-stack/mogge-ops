@@ -122,7 +122,8 @@ a {
   padding: 0 8px 16px;
 }
 
-.nav-flow span {
+.nav-flow span,
+.nav-flow a {
   min-height: 24px;
   display: inline-flex;
   align-items: center;
@@ -132,6 +133,11 @@ a {
   color: #59726a;
   font-size: 12px;
   border: 1px solid #e2ebe7;
+}
+
+.nav-flow a:hover {
+  border-color: #bfe3d6;
+  color: var(--green-dark);
 }
 
 .nav a {
@@ -680,9 +686,27 @@ a {
     font-size: 15px;
   }
 
-  .brand-text small,
-  .nav-flow {
+  .brand-text small {
     display: none;
+  }
+
+  .nav-flow {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 6px;
+    overflow-x: auto;
+    padding: 0 0 8px;
+    scrollbar-width: none;
+  }
+
+  .nav-flow::-webkit-scrollbar {
+    display: none;
+  }
+
+  .nav-flow a {
+    min-height: 32px;
+    flex: 0 0 auto;
+    font-size: 13px;
   }
 
   .nav {
@@ -722,6 +746,18 @@ a {
 
   .topbar h1 {
     font-size: 25px;
+  }
+
+  .top-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .top-actions .button,
+  .top-actions .button.icon {
+    width: 100%;
+    min-height: 44px;
   }
 
   .panel {
@@ -764,6 +800,7 @@ a {
   .toolbar .button,
   .toolbar .input,
   .toolbar .select {
+    max-width: none !important;
     flex: 1 1 100%;
   }
 
@@ -795,6 +832,20 @@ a {
   .textarea {
     min-height: 118px;
   }
+
+  .guide-content {
+    max-height: 68vh;
+    overflow: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .list {
+    gap: 10px;
+  }
+
+  .item {
+    padding: 12px;
+  }
 }
 
 @media (max-width: 420px) {
@@ -808,5 +859,9 @@ a {
 
   .top-actions .button:not(.icon) {
     width: 100%;
+  }
+
+  .top-actions {
+    grid-template-columns: 1fr;
   }
 }
