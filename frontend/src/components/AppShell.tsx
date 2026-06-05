@@ -64,6 +64,18 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </div>
       </aside>
       <main className="main">{children}</main>
+      <nav className="mobile-tabbar" aria-label="手机快捷导航">
+        {nav.map((item) => {
+          const Icon = item.icon;
+          const active = item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
+          return (
+            <Link className={active ? "active" : ""} href={item.href} key={`mobile-${item.href}`}>
+              <Icon size={18} />
+              <span>{item.label}</span>
+            </Link>
+          );
+        })}
+      </nav>
     </div>
   );
 }
