@@ -13,6 +13,7 @@ export default function DashboardPage() {
   const [topics, setTopics] = useState<Topic[]>([]);
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
+  const [actionLoading, setActionLoading] = useState<"monitor" | "topics" | null>(null);
 
   async function load() {
     const [dash, systemStatus, topicRows] = await Promise.all([
@@ -39,20 +40,25 @@ export default function DashboardPage() {
   }
 
   async function runMonitor() {
+    setActionLoading("monitor");
     setMessage("正在运行监控...");
     try {
       const result = await apiPost<{ hot_events_created: number; topics_generated: number; message: string }>("/dashboard/quick-monitor");
-      setMessage("监控完成，已刷新今日任务。");
       if (result.topics_generated || result.hot_events_created) {
         setMessage(`监控完成：新增热点 ${result.hot_events_created} 条，生成选题 ${result.topics_generated} 个。`);
+      } else {
+        setMessage("监控已运行完成：暂无新增热点，现有选题已保留，可进入选题池查看。");
       }
       await load();
     } catch (error) {
       setMessage(`监控运行失败：${error instanceof Error ? error.message : "请确认软件仍在运行"}`);
+    } finally {
+      setActionLoading(null);
     }
   }
 
   async function generateTopics() {
+    setActionLoading("topics");
     setMessage("正在生成选题...");
     try {
       const result = await apiPost<{ topics_generated: number; topics_total: number; message: string }>("/dashboard/quick-topics");
@@ -60,6 +66,8 @@ export default function DashboardPage() {
       await load();
     } catch (error) {
       setMessage(`选题生成失败：${error instanceof Error ? error.message : "请确认软件仍在运行"}`);
+    } finally {
+      setActionLoading(null);
     }
   }
 
@@ -97,13 +105,13 @@ export default function DashboardPage() {
         ]}
       />
       <section className="panel quick-actions">
-        <button className="quick-action" onClick={runMonitor}>
+        <button className="quick-action" onClick={runMonitor} disabled={actionLoading !== null}>
           <Bell size={20} />
-          <span>运行监控</span>
+          <span>{actionLoading === "monitor" ? "运行中..." : "运行监控"}</span>
         </button>
-        <button className="quick-action" onClick={generateTopics}>
+        <button className="quick-action" onClick={generateTopics} disabled={actionLoading !== null}>
           <Plus size={20} />
-          <span>生成选题</span>
+          <span>{actionLoading === "topics" ? "生成中..." : "生成选题"}</span>
         </button>
         <Link className="quick-action" href="/workspace">
           <FileText size={20} />
