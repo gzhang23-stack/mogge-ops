@@ -29,8 +29,10 @@ const nav = [
 
 const mobileNav = [
   { href: "/", label: "控制台", icon: Gauge },
-  { href: "/monitors", label: "监控", icon: RadioTower, hardReload: true },
+  { href: "/articles", label: "知识库", icon: BookOpen },
+  { href: "/monitors", label: "监控", icon: RadioTower },
   { href: "/topics", label: "选题池", icon: MonitorDot },
+  { href: "/workspace", label: "写作台", icon: PenLine },
   { href: "/reviews", label: "审核台", icon: ShieldCheck },
   { href: "/reports", label: "复盘", icon: BarChart3 }
 ];
@@ -84,26 +86,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         })}
       </nav>
       <main className="main">{children}</main>
-      <nav className="mobile-tabbar" aria-label="手机快捷导航">
-        {mobileNav.map((item) => {
-          const Icon = item.icon;
-          const active = item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
-          if (item.hardReload) {
-            return (
-              <a className={active ? "active" : ""} href={item.href} key={`mobile-${item.href}`}>
-                <Icon size={18} />
-                <span>{item.label}</span>
-              </a>
-            );
-          }
-          return (
-            <Link className={active ? "active" : ""} href={item.href} key={`mobile-${item.href}`}>
-              <Icon size={18} />
-              <span>{item.label}</span>
-            </Link>
-          );
-        })}
-      </nav>
     </div>
   );
 }
