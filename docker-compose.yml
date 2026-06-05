@@ -1,0 +1,37 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: mogge-ops-backend
+    env_file:
+      - ./deploy/.env.production
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/system/status"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    volumes:
+      - ./data:/app/data
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: mogge-ops-postgres
+    profiles:
+      - local-db
+    environment:
+      POSTGRES_DB: mogge_ops
+      POSTGRES_USER: mogge_ops
+      POSTGRES_PASSWORD: change-me
+    ports:
+      - "5432:5432"
+    restart: unless-stopped
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:
