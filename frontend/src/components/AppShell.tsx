@@ -71,6 +71,18 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <span>人工终审保留</span>
         </div>
       </aside>
+      <nav className="mobile-topnav" aria-label="手机顶部导航">
+        {mobileNav.map((item) => {
+          const Icon = item.icon;
+          const active = item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
+          return (
+            <a className={active ? "active" : ""} href={item.href} key={`mobile-top-${item.href}`}>
+              <Icon size={16} />
+              <span>{item.label}</span>
+            </a>
+          );
+        })}
+      </nav>
       <main className="main">{children}</main>
       <nav className="mobile-tabbar" aria-label="手机快捷导航">
         {mobileNav.map((item) => {
