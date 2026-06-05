@@ -27,16 +27,6 @@ const nav = [
   { href: "/reports", label: "复盘", icon: BarChart3 }
 ];
 
-const mobileNav = [
-  { href: "/", label: "控制台", icon: Gauge },
-  { href: "/articles", label: "知识库", icon: BookOpen },
-  { href: "/monitors", label: "监控", icon: RadioTower },
-  { href: "/topics", label: "选题池", icon: MonitorDot },
-  { href: "/workspace", label: "写作台", icon: PenLine },
-  { href: "/reviews", label: "审核台", icon: ShieldCheck },
-  { href: "/reports", label: "复盘", icon: BarChart3 }
-];
-
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   return (
@@ -73,19 +63,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <span>人工终审保留</span>
         </div>
       </aside>
-      <nav className="mobile-topnav" aria-label="手机顶部导航">
-        {mobileNav.map((item) => {
-          const Icon = item.icon;
-          const active = item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
-          return (
-            <a className={active ? "active" : ""} href={item.href} key={`mobile-top-${item.href}`}>
-              <Icon size={16} />
-              <span>{item.label}</span>
-            </a>
-          );
-        })}
-      </nav>
-      <main className="main">{children}</main>
+      <main className="main">
+        {children}
+        <footer className="site-footer">网站备案号：陕ICP备2026013948号-1</footer>
+      </main>
     </div>
   );
 }
