@@ -9,6 +9,8 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - name: Configure SSH
         run: |
           mkdir -p ~/.ssh
@@ -16,15 +18,14 @@ jobs:
           chmod 600 ~/.ssh/tencent_deploy_key
           ssh-keyscan -H "${{ secrets.TENCENT_HOST }}" >> ~/.ssh/known_hosts
 
+      - name: Upload repository snapshot to Tencent CVM
+        run: |
+          git archive --format=tar HEAD | ssh -i ~/.ssh/tencent_deploy_key "${{ secrets.TENCENT_USER }}@${{ secrets.TENCENT_HOST }}" "mkdir -p /opt/mogge-ops && tar -xf - -C /opt/mogge-ops"
+
       - name: Deploy frontend on Tencent CVM
         run: |
           ssh -i ~/.ssh/tencent_deploy_key "${{ secrets.TENCENT_USER }}@${{ secrets.TENCENT_HOST }}" <<'EOF'
           set -e
-          cd /opt/mogge-ops
-          git fetch origin main
-          git checkout main
-          git pull --ff-only origin main
-
           cd /opt/mogge-ops/frontend
           printf 'NEXT_PUBLIC_API_BASE=/api\n' > .env.production
           rm -rf out .next
