@@ -12,6 +12,7 @@ export default function DashboardPage() {
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [topics, setTopics] = useState<Topic[]>([]);
   const [message, setMessage] = useState("");
+  const [loading, setLoading] = useState(false);
 
   async function load() {
     const [dash, systemStatus, topicRows] = await Promise.all([
@@ -22,6 +23,19 @@ export default function DashboardPage() {
     setDashboard(dash);
     setStatus(systemStatus);
     setTopics(topicRows.slice(0, 5));
+  }
+
+  async function refreshDashboard() {
+    setLoading(true);
+    setMessage("正在刷新数据...");
+    try {
+      await load();
+      setMessage("刷新完成。");
+    } catch (error) {
+      setMessage(`刷新失败：${error instanceof Error ? error.message : "请确认后端服务正在运行"}`);
+    } finally {
+      setLoading(false);
+    }
   }
 
   async function runMonitor() {
@@ -68,7 +82,7 @@ export default function DashboardPage() {
       <PageHeader
         title="今日运营"
         actions={
-          <button className="button icon" title="刷新" onClick={load}>
+          <button className="button icon" title="刷新" onClick={refreshDashboard} disabled={loading}>
             <RefreshCw size={17} />
           </button>
         }
