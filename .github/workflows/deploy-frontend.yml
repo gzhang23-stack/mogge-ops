@@ -52,13 +52,17 @@ jobs:
 
           cat > /etc/caddy/Caddyfile <<'CADDY'
           we.diqiuliulang.com {
-              handle_path /api/* {
+              @api path /api/*
+              handle @api {
+                  uri strip_prefix /api
                   reverse_proxy 127.0.0.1:8000
               }
 
-              root * /opt/mogge-ops/frontend/out
-              try_files {path} {path}/index.html /index.html
-              file_server
+              handle {
+                  root * /opt/mogge-ops/frontend/out
+                  try_files {path} {path}/index.html /index.html
+                  file_server
+              }
           }
 
           api.diqiuliulang.com {
