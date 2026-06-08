@@ -48,5 +48,5 @@ jobs:
           npm run build
 
           pkill -f "serve -s /opt/mogge-ops/frontend/out" || true
-          nohup npx serve -s /opt/mogge-ops/frontend/out -l 3000 --single > /opt/mogge-ops/frontend/frontend.log 2>&1 &
+          nohup npx serve -s /opt/mogge-ops/frontend/out -l 3000 > /opt/mogge-ops/frontend/frontend.log 2>&1 &
           EOF
