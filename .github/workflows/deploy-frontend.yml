@@ -26,6 +26,12 @@ jobs:
         run: |
           ssh -i ~/.ssh/tencent_deploy_key "${{ secrets.TENCENT_USER }}@${{ secrets.TENCENT_HOST }}" <<'EOF'
           set -e
+          cd /opt/mogge-ops/backend
+          python3 -m venv venv
+          venv/bin/pip install -r requirements.txt
+          pkill -f "uvicorn app.main:app" || true
+          nohup venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 > /opt/mogge-ops/backend/backend.log 2>&1 &
+
           cd /opt/mogge-ops/frontend
           printf 'NEXT_PUBLIC_API_BASE=/api\n' > .env.production
           rm -rf out .next
