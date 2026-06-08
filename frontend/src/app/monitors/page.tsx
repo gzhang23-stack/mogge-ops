@@ -28,7 +28,9 @@ export default function MonitorsPage() {
   const [dingtalkSecret, setDingtalkSecret] = useState("");
   const [message, setMessage] = useState("");
   const [showGuide, setShowGuide] = useState(false);
+  const [showDisabledSources, setShowDisabledSources] = useState(false);
   const enabledSources = sources.filter((source) => source.enabled);
+  const disabledSources = sources.filter((source) => !source.enabled);
   const sourceTypes = Array.from(new Set(sources.map((source) => source.source_type))).length;
 
   async function load() {
@@ -403,18 +405,20 @@ export default function MonitorsPage() {
         </div>
       </section>
       <section className="panel" style={{ marginTop: 14 }}>
-        <h2 className="section-title">监控源</h2>
+        <h2 className="section-title">启用监控源</h2>
         <div className="toolbar">
           <input className="input" style={{ maxWidth: 220 }} placeholder="来源名称" value={newSourceName} onChange={(e) => setNewSourceName(e.target.value)} />
           <input className="input" style={{ maxWidth: 520 }} placeholder="RSS URL" value={newSourceUrl} onChange={(e) => setNewSourceUrl(e.target.value)} />
           <button className="button" onClick={addSource}><Plus size={17} /> 添加</button>
+          <span className="badge green">启用 {enabledSources.length}</span>
+          <span className="badge amber">停用 {disabledSources.length}</span>
         </div>
         <div className="grid cols-3">
-          {sources.map((source) => (
+          {enabledSources.map((source) => (
             <div className="item" key={source.id}>
               <div className="item-head">
                 <div className="item-title">{source.name}</div>
-                <span className={`badge ${source.enabled ? "green" : "amber"}`}>{source.enabled ? "启用" : "停用"}</span>
+                <span className="badge green">启用</span>
               </div>
               <p className="muted">{source.notes || source.url}</p>
               <div className="item-meta">
@@ -424,6 +428,31 @@ export default function MonitorsPage() {
             </div>
           ))}
         </div>
+        {disabledSources.length ? (
+          <div style={{ marginTop: 14 }}>
+            <button className="guide-toggle" onClick={() => setShowDisabledSources((value) => !value)}>
+              <span>已停用监控源（{disabledSources.length}）</span>
+              {showDisabledSources ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
+            </button>
+            {showDisabledSources ? (
+              <div className="grid cols-3" style={{ marginTop: 12 }}>
+                {disabledSources.map((source) => (
+                  <div className="item" key={source.id}>
+                    <div className="item-head">
+                      <div className="item-title">{source.name}</div>
+                      <span className="badge amber">停用</span>
+                    </div>
+                    <p className="muted">{source.notes || source.url}</p>
+                    <div className="item-meta">
+                      <span className="badge">{source.source_type}</span>
+                      <span className="badge">{source.account_bias}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </section>
       <div className="grid cols-2" style={{ marginTop: 14 }}>
         <section className="panel">
