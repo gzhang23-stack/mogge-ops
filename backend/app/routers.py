@@ -26,6 +26,7 @@ def topic_to_out(db: Session, topic: models.Topic) -> schemas.TopicOut:
         status=topic.status,
         historical_reference_ids=topic.historical_reference_ids,
         score=score,
+        source_info=services.topic_source_info(db, topic),
     )
 
 
@@ -102,45 +103,18 @@ def dashboard(db: Session = Depends(get_db)) -> schemas.DashboardOut:
     )
 
 
-def _ensure_quick_hot_events(db: Session) -> int:
-    services.ensure_default_monitor_sources(db)
-    titles = [
-        "青年基金申请书常见问题进入集中讨论期",
-        "高校博士后出站求职季岗位信息增加",
-        "近期撤稿事件引发科研诚信讨论",
-        "高校人才政策变化值得持续跟踪",
-        "顶刊论文和预印本热点值得做事实核查",
-    ]
-    created = 0
-    for title in titles:
-        exists = db.scalars(select(models.ExternalHotEvent.id).where(models.ExternalHotEvent.event_title == title)).first()
-        if exists:
-            continue
-        db.add(
-            models.ExternalHotEvent(
-                event_title=title,
-                heat_index=85 if "撤稿" in title or "人才政策" in title else 70,
-                source_platform="quick_start",
-                extracted_keywords=services.extract_tags(title),
-            )
-        )
-        created += 1
-    db.commit()
-    return created
-
-
 @router.post("/dashboard/quick-monitor")
 def quick_monitor(
     db: Session = Depends(get_db),
     actor: dict[str, str] = Depends(require_permission("topics:generate")),
 ) -> dict:
-    hot_created = _ensure_quick_hot_events(db)
-    topics = services.generate_topics(db, "今日科研与高校人才热点", 3, actor["user"])
+    hot_created, academic_created = services.run_monitors(db, [], actor["user"])
     return {
         "hot_events_created": hot_created,
-        "topics_generated": len(topics),
-        "mode": "quick_local",
-        "message": "快速监控已完成。完整全网抓取请到监控页点击“运行监控”。",
+        "academic_items_created": academic_created,
+        "topics_generated": 0,
+        "mode": "strict_monitor",
+        "message": "监控已完成：仅保留命中关键词且发布时间符合窗口的新闻，不自动生成选题。",
     }
 
 
@@ -149,14 +123,13 @@ def quick_topics(
     db: Session = Depends(get_db),
     actor: dict[str, str] = Depends(require_permission("topics:generate")),
 ) -> dict:
-    _ensure_quick_hot_events(db)
-    topics = services.generate_topics(db, "今日科研与高校人才热点", 3, actor["user"])
+    topics = services.generate_topics(db, None, 3, actor["user"])
     existing = db.scalar(select(func.count(models.Topic.id))) or 0
     return {
         "topics_generated": len(topics),
         "topics_total": existing,
-        "mode": "quick_local",
-        "message": "选题已准备好。若本次没有新增，说明相似选题已经在选题池里。",
+        "mode": "source_required",
+        "message": "只会从近期有效监控热点生成选题；没有真实热点支撑时不会生成。",
     }
 
 
@@ -404,8 +377,8 @@ def import_wechat_articles(
 
 @router.get("/monitors/items")
 def monitor_items(db: Session = Depends(get_db)) -> dict[str, list[dict]]:
-    hot_events = db.scalars(select(models.ExternalHotEvent).order_by(models.ExternalHotEvent.id.desc()).limit(20)).all()
-    academic = db.scalars(select(models.AcademicMonitorItem).order_by(models.AcademicMonitorItem.id.desc()).limit(20)).all()
+    services.ensure_default_monitor_sources(db)
+    hot_events, academic = services.monitor_result_candidates(db, 50, 30)
     conversions = db.scalars(select(models.MonitorConversion)).all()
     conversion_map = {(item.item_type, item.item_id): item.topic_id for item in conversions}
     return {
@@ -415,6 +388,10 @@ def monitor_items(db: Session = Depends(get_db)) -> dict[str, list[dict]]:
                 "event_title": item.event_title,
                 "heat_index": item.heat_index,
                 "source_platform": item.source_platform,
+                "source_url": item.source_url,
+                "published_at": services.hot_event_published_at(item),
+                "crawled_at": item.created_at,
+                "summary": item.raw_payload.get("summary", "") if isinstance(item.raw_payload, dict) else "",
                 "keywords": item.extracted_keywords,
                 "status": "CONVERTED" if ("hot_event", item.id) in conversion_map else "UNREAD",
                 "topic_id": conversion_map.get(("hot_event", item.id)),
@@ -428,6 +405,9 @@ def monitor_items(db: Session = Depends(get_db)) -> dict[str, list[dict]]:
                 "translated_title": item.translated_title,
                 "translated_summary": item.translated_summary,
                 "source_url": item.source_url,
+                "published_at": services.academic_item_published_at(item),
+                "crawled_at": item.created_at,
+                "original_title": item.original_title,
                 "risk_level": item.risk_level,
                 "status": "CONVERTED" if ("academic_item", item.id) in conversion_map else item.status,
                 "topic_id": conversion_map.get(("academic_item", item.id)),
@@ -477,6 +457,23 @@ def convert_academic_item(
     return topic_to_out(db, topic)
 
 
+@router.post("/monitors/{item_type}/{item_id}/feedback")
+def monitor_feedback(
+    item_type: str,
+    item_id: int,
+    payload: schemas.FeedbackRequest,
+    db: Session = Depends(get_db),
+    actor: dict[str, str] = Depends(require_permission("topics:generate")),
+) -> dict:
+    normalized = {"hot-events": "hot_event", "hot_event": "hot_event", "academic-items": "academic_item", "academic_item": "academic_item"}.get(item_type)
+    if not normalized:
+        raise HTTPException(status_code=400, detail="Unsupported monitor item type")
+    try:
+        return services.record_monitor_feedback(db, normalized, item_id, payload.reason, payload.note, actor["user"])
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.post("/topics/generate", response_model=list[schemas.TopicOut])
 def generate_topics(
     payload: schemas.TopicGenerateRequest,
@@ -487,11 +484,21 @@ def generate_topics(
     return [topic_to_out(db, topic) for topic in topics]
 
 
+@router.post("/topics/cleanup-unsupported")
+def cleanup_unsupported_topics(
+    db: Session = Depends(get_db),
+    actor: dict[str, str] = Depends(require_permission("topics:generate")),
+) -> dict[str, int]:
+    return services.cleanup_unsupported_topics(db, actor["user"])
+
+
 @router.get("/topics", response_model=list[schemas.TopicOut])
 def list_topics(db: Session = Depends(get_db), status: models.TopicStatus | None = None) -> list[schemas.TopicOut]:
     stmt = select(models.Topic).order_by(models.Topic.updated_at.desc())
     if status:
         stmt = stmt.where(models.Topic.status == status)
+    else:
+        stmt = stmt.where(models.Topic.status != models.TopicStatus.discarded)
     rows: list[schemas.TopicOut] = []
     seen: set[tuple[str, str]] = set()
     for topic in db.scalars(stmt).all():
@@ -501,6 +508,19 @@ def list_topics(db: Session = Depends(get_db), status: models.TopicStatus | None
         seen.add(key)
         rows.append(topic_to_out(db, topic))
     return rows
+
+
+@router.post("/topics/{topic_id}/feedback")
+def topic_feedback(
+    topic_id: int,
+    payload: schemas.FeedbackRequest,
+    db: Session = Depends(get_db),
+    actor: dict[str, str] = Depends(require_permission("topics:generate")),
+) -> dict:
+    try:
+        return services.record_topic_feedback(db, topic_id, payload.reason, payload.note, actor["user"])
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/topics/{topic_id}/approve", response_model=schemas.TopicOut)

@@ -105,6 +105,16 @@ export interface Topic {
   status: TopicStatus;
   historical_reference_ids: number[];
   score?: number;
+  source_info?: null | {
+    item_type: string;
+    item_id: number;
+    title: string;
+    source: string;
+    source_url: string;
+    published_at?: string | null;
+    crawled_at?: string | null;
+    valid: boolean;
+  };
 }
 
 export interface WorkspaceData {
@@ -156,6 +166,10 @@ export interface MonitorItems {
     event_title: string;
     heat_index: number;
     source_platform: string;
+    source_url: string;
+    published_at?: string | null;
+    crawled_at?: string | null;
+    summary?: string;
     keywords: string[];
     status: string;
     topic_id?: number;
@@ -163,9 +177,12 @@ export interface MonitorItems {
   academic_items: Array<{
     id: number;
     source_platform: string;
+    original_title: string;
     translated_title: string;
     translated_summary: string;
     source_url: string;
+    published_at?: string | null;
+    crawled_at?: string | null;
     risk_level: RiskLevel;
     status: string;
     topic_id?: number;

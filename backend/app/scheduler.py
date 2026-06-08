@@ -14,7 +14,6 @@ def _monitor_job() -> None:
     db = SessionLocal()
     try:
         services.run_monitors(db, [], "scheduler")
-        services.generate_topics(db, None, max(1, int(automation.get_raw_settings(db).get("push_topic_limit") or 8) // 2), "scheduler")
     finally:
         db.close()
 

@@ -43,11 +43,11 @@ export default function DashboardPage() {
     setActionLoading("monitor");
     setMessage("正在运行监控...");
     try {
-      const result = await apiPost<{ hot_events_created: number; topics_generated: number; message: string }>("/dashboard/quick-monitor");
-      if (result.topics_generated || result.hot_events_created) {
-        setMessage(`监控完成：新增热点 ${result.hot_events_created} 条，生成选题 ${result.topics_generated} 个。`);
+      const result = await apiPost<{ hot_events_created: number; academic_items_created?: number; topics_generated: number; message: string }>("/dashboard/quick-monitor");
+      if (result.hot_events_created || result.academic_items_created) {
+        setMessage(`监控完成：新增中文热点 ${result.hot_events_created} 条，英文前沿 ${result.academic_items_created || 0} 条；未自动生成选题。`);
       } else {
-        setMessage("监控已运行完成：暂无新增热点，现有选题已保留，可进入选题池查看。");
+        setMessage("监控已运行完成：暂无符合关键词和时效硬条件的新增新闻。");
       }
       await load();
     } catch (error) {
@@ -59,10 +59,10 @@ export default function DashboardPage() {
 
   async function generateTopics() {
     setActionLoading("topics");
-    setMessage("正在生成选题...");
+    setMessage("正在从有效监控热点生成选题...");
     try {
       const result = await apiPost<{ topics_generated: number; topics_total: number; message: string }>("/dashboard/quick-topics");
-      setMessage(result.topics_generated ? `选题已生成 ${result.topics_generated} 个。` : `选题池已有 ${result.topics_total} 个选题，可直接进入选题池或写作台。`);
+      setMessage(result.topics_generated ? `已基于真实监控热点生成 ${result.topics_generated} 个选题。` : "没有可用的近期监控热点，本次未生成选题。");
       await load();
     } catch (error) {
       setMessage(`选题生成失败：${error instanceof Error ? error.message : "请确认软件仍在运行"}`);
@@ -98,8 +98,8 @@ export default function DashboardPage() {
       <Guide
         title="今天怎么用"
         steps={[
-          { title: "先跑监控", body: "首页“运行监控”会快速准备今日热点和候选选题；完整全网抓取请进入监控页执行。" },
-          { title: "再看选题", body: "点击“生成选题”或进入选题池，挑出今天值得写的内容，确认后进入写作台。" },
+          { title: "先跑监控", body: "首页“运行监控”只抓取符合关键词和时效硬条件的新闻，不自动编选题。" },
+          { title: "再看选题", body: "点击“生成选题”时，只会从有效监控热点转化；没有真实热点就不会生成。" },
           { title: "写完审核", body: "写作台按资料包、大纲、初稿、标题、风控推进，提交后在审核台通过或退回。" },
           { title: "最后复盘", body: "发布后录入数据，复盘页会给出标题、栏目、选题方向和下一轮内容建议。" },
         ]}
@@ -176,7 +176,7 @@ export default function DashboardPage() {
                 </div>
               </div>
             ))}
-            {!topics.length ? <div className="item muted">暂无候选选题，先点击“运行监控”或“生成选题”。</div> : null}
+            {!topics.length ? <div className="item muted">暂无候选选题。请先运行监控，等出现近期热点后再生成。</div> : null}
           </div>
         </section>
         <section className="panel">

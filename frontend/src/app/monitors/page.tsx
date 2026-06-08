@@ -1,28 +1,30 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Link from "next/link";
-import { ArrowRight, Bell, ChevronDown, ChevronUp, Plus, RadioTower, RefreshCw } from "lucide-react";
-import { apiGet, apiPost, apiPut, AutomationSettings, MonitorItems, MonitorSource, Topic } from "@/lib/api";
+import { Bell, ChevronDown, ChevronUp, ExternalLink, Plus, RadioTower, RefreshCw } from "lucide-react";
+import { apiGet, apiPost, apiPut, AutomationSettings, MonitorItems, MonitorSource } from "@/lib/api";
 import { PageHeader, RiskBadge } from "@/components/Ui";
 
 const sourceQuality = [
-  { title: "官方源优先", body: "基金委、科技部、教育部、中科院、NIH、NSF 等用于政策、基金和权威动态。" },
-  { title: "期刊源做前沿", body: "Nature、Science、Cell、PNAS、arXiv、bioRxiv 等用于论文和研究趋势，预印本必须标注未同行评议。" },
-  { title: "媒体源找角度", body: "科学网、EurekAlert、THE、Inside Higher Ed、LSE Impact Blog 适合发现讨论点和高教生态变化。" },
-  { title: "公众号作线索", body: "学术志、科研圈、知识分子、高校人才网等只作为线索入口，转稿必须核实原始来源和版权。" },
+  { title: "中文硬条件", body: "必须命中关键词，且新闻发布时间在 24 小时内；抓取时间不能替代发布时间。" },
+  { title: "科学网收口", body: "科学网只保留“所有新闻”，其他科学网细分源会自动停用。" },
+  { title: "英文收口", body: "英文只保留 Nature News、Retraction Watch、Science News，窗口为 72 小时。" },
+  { title: "只看新闻", body: "监控页展示和推送第一手新闻线索，不自动生成选题。" },
 ];
+
+function formatTime(value?: string | null) {
+  if (!value) return "未解析";
+  return new Date(value).toLocaleString("zh-CN", { hour12: false });
+}
 
 export default function MonitorsPage() {
   const [items, setItems] = useState<MonitorItems>({ hot_events: [], academic_items: [] });
   const [sources, setSources] = useState<MonitorSource[]>([]);
   const [scheduler, setScheduler] = useState<{ enabled: boolean; running: boolean; interval_minutes: number; dingtalk_configured: boolean } | null>(null);
   const [settings, setSettings] = useState<AutomationSettings | null>(null);
-  const [manualEvent, setManualEvent] = useState("某高校人才政策变化引发青年教师讨论");
-  const [targetAccount, setTargetAccount] = useState("募格学术");
   const [newSourceName, setNewSourceName] = useState("");
   const [newSourceUrl, setNewSourceUrl] = useState("");
-  const [wechatBatch, setWechatBatch] = useState("学术志, gh_xxxxxxxx\n募格学术, wx7b675a397921998e");
+  const [wechatBatch, setWechatBatch] = useState("学术志\n科研圈\n知识分子");
   const [dingtalkSecret, setDingtalkSecret] = useState("");
   const [message, setMessage] = useState("");
   const [showGuide, setShowGuide] = useState(false);
@@ -42,14 +44,14 @@ export default function MonitorsPage() {
   }
 
   async function run() {
-    const result = await apiPost<{ hot_events_created: number; academic_items_created: number }>("/monitors/run", { manual_events: manualEvent ? [manualEvent] : [] });
+    const result = await apiPost<{ hot_events_created: number; academic_items_created: number }>("/monitors/run", { manual_events: [] });
     setMessage(`新增热点 ${result.hot_events_created} 条，前沿 ${result.academic_items_created} 条`);
     await load();
   }
 
   async function runAndPush() {
-    const result = await apiPost<{ topics_pushed: number; push_result: { ok?: boolean; reason?: string } }>("/monitors/run-and-push");
-    setMessage(`自动监控完成，推送选题 ${result.topics_pushed} 个；钉钉：${result.push_result?.ok ? "成功" : result.push_result?.reason || "未配置"}`);
+    const result = await apiPost<{ monitor_items_pushed: number; push_result: { ok?: boolean; reason?: string } }>("/monitors/run-and-push");
+    setMessage(`自动监控完成，推送监控新闻 ${result.monitor_items_pushed || 0} 条；钉钉：${result.push_result?.ok ? "成功" : result.push_result?.reason || "未配置"}`);
     await load();
   }
 
@@ -125,15 +127,12 @@ export default function MonitorsPage() {
     await load();
   }
 
-  async function convertHot(id: number) {
-    const topic = await apiPost<Topic>(`/monitors/hot-events/${id}/convert`, { target_account: targetAccount });
-    setMessage(`已转选题：${topic.title}`);
-    await load();
-  }
-
-  async function convertAcademic(id: number) {
-    const topic = await apiPost<Topic>(`/monitors/academic-items/${id}/convert`, { target_account: targetAccount });
-    setMessage(`已转选题：${topic.title}`);
+  async function sendFeedback(itemType: "hot-events" | "academic-items", id: number) {
+    await apiPost(`/monitors/${itemType}/${id}/feedback`, {
+      reason: "不符合监控硬性要求",
+      note: "页面反馈：疑似旧闻、关键词不符、来源或发布时间异常。"
+    });
+    setMessage("反馈已记录，这条内容将从监控结果中隐藏，并影响后续筛选。");
     await load();
   }
 
@@ -163,19 +162,19 @@ export default function MonitorsPage() {
           <div className="guide-content">
             <div className="guide-step">
               <strong>1. 先看监控源</strong>
-              <p>系统已内置国内外学术监控源，包括科学网、中国科学院、基金委、Nature、EurekAlert、Retraction Watch、NIH、NSF、arXiv、bioRxiv 等。新增来源时优先填写公开 RSS；没有 RSS 的官网列表页可后续接入为页面抓取源。</p>
+              <p>系统只保留指定源：科学网所有新闻、重点中文新闻媒体，以及 Nature News、Retraction Watch、Science News。旧的科学网细分源和其他英文前沿源会停用。</p>
             </div>
             <div className="guide-step">
               <strong>2. 运行监控</strong>
-              <p>点击“运行监控”会抓取启用中的来源，并自动去重。国外前沿资讯会优先用 DeepSeek 翻译摘要；未配置或调用失败时使用本地摘要兜底。</p>
+              <p>点击“运行监控”后，中文新闻必须同时满足两个条件：命中监控关键词之一，且发布时间在 24 小时内。英文前沿只保留 72 小时内内容。</p>
             </div>
             <div className="guide-step">
-              <strong>3. 补充人工热点</strong>
-              <p>左侧输入框可录入当天编辑观察到的热点，如基金申报、撤稿事件、高校人才政策、博士后招聘季等。旁边的公众号选择会影响“转选题”的目标账号。</p>
+              <strong>3. 看新闻，不看选题</strong>
+              <p>监控页展示的是抓取到的第一手新闻线索，按重要性排序。系统不会在这里自动生成选题，也不会把抓取时间当作发布时间。</p>
             </div>
             <div className="guide-step">
-              <strong>4. 一键转选题</strong>
-              <p>在“全网热点”或“学术前沿”条目里点击“转选题”，系统会生成候选选题、账号栏目、推荐理由、风险等级和历史相似文章。已转选题后可直接进入写作台。</p>
+              <strong>4. 反馈不合格内容</strong>
+              <p>如果发现旧闻、关键词不符、来源错误或发布时间异常，点击“反馈不合格”。该条会被隐藏，并记录到后续筛选逻辑中。</p>
             </div>
             <div className="guide-step">
               <strong>5. 风险必须核实</strong>
@@ -183,7 +182,7 @@ export default function MonitorsPage() {
             </div>
             <div className="guide-step">
               <strong>6. 自动推送钉钉</strong>
-              <p>在后端 `.env` 配置钉钉机器人 Webhook 和 Secret，并开启自动任务后，系统会定时运行监控，筛选评分达标且非高风险的候选选题推送到群。高风险选题只入库，不自动推送。</p>
+              <p>开启自动任务后，系统按频率运行监控并推送监控新闻摘要。推送的是新闻本身，不是 AI 选题。</p>
             </div>
             <div className="guide-step">
               <strong>7. 重大新闻即时推送</strong>
@@ -191,7 +190,7 @@ export default function MonitorsPage() {
             </div>
             <div className="guide-step">
               <strong>8. 微信公众号</strong>
-              <p>批量粘贴“公众号名,微信号”即可建立监控源。若配置 RSSHub 基础地址，系统会自动尝试拉取公众号文章；若无法拉取，可用文章链接导入作为兜底。</p>
+              <p>非自有公众号无法拿 AppID 或私密 ID。可行方案是 RSSHub/WeWe-RSS 自动拉取公开文章，或者批量导入文章链接作为兜底；系统不会要求你填写别人的 AppID。</p>
             </div>
           </div>
         ) : null}
@@ -365,12 +364,10 @@ export default function MonitorsPage() {
       ) : null}
       <section className="panel">
         <div className="toolbar">
-          <input className="input" style={{ maxWidth: 520 }} value={manualEvent} onChange={(e) => setManualEvent(e.target.value)} />
-          <select className="select" style={{ maxWidth: 150 }} value={targetAccount} onChange={(e) => setTargetAccount(e.target.value)}>
-            <option value="募格学术">募格学术</option>
-            <option value="募格科聘">募格科聘</option>
-          </select>
           <button className="button" onClick={testDingTalk}><Bell size={17} /> 测试钉钉</button>
+          <span className="badge green">中文 24 小时</span>
+          <span className="badge">英文 72 小时</span>
+          <span className="badge amber">不自动生成选题</span>
         </div>
         {scheduler ? (
           <div className="item-meta">
@@ -430,29 +427,32 @@ export default function MonitorsPage() {
       </section>
       <div className="grid cols-2" style={{ marginTop: 14 }}>
         <section className="panel">
-          <h2 className="section-title">全网热点</h2>
+          <h2 className="section-title">中文热点新闻</h2>
           <div className="list">
             {items.hot_events.map((item) => (
               <div className="item" key={item.id}>
                 <div className="item-head">
                   <div className="item-title">{item.event_title}</div>
-                  <span className={`badge ${item.status === "CONVERTED" ? "green" : "amber"}`}>{item.status === "CONVERTED" ? "已转选题" : "待处理"}</span>
+                  <span className="badge amber">重要性 {item.heat_index}</span>
                 </div>
+                {item.summary ? <p className="muted">{item.summary}</p> : null}
                 <div className="item-meta">
-                  <span className="badge amber">热度 {item.heat_index}</span>
                   <span className="badge">{item.source_platform}</span>
+                  <span className="badge green">发布 {formatTime(item.published_at)}</span>
+                  <span className="badge">抓取 {formatTime(item.crawled_at)}</span>
                   {item.keywords.map((keyword) => <span className="badge green" key={keyword}>{keyword}</span>)}
                 </div>
                 <div className="toolbar" style={{ marginTop: 10, marginBottom: 0 }}>
-                  {item.topic_id ? <Link className="button blue" href={`/workspace?topic=${item.topic_id}`}>写作台</Link> : null}
-                  <button className="button" onClick={() => convertHot(item.id)}><ArrowRight size={17} /> 转选题</button>
+                  {item.source_url ? <a className="button blue" href={item.source_url} target="_blank"><ExternalLink size={17} /> 原文</a> : null}
+                  <button className="button" onClick={() => sendFeedback("hot-events", item.id)}>反馈不合格</button>
                 </div>
               </div>
             ))}
+            {!items.hot_events.length ? <div className="item muted">暂无符合 24 小时和关键词硬条件的中文新闻。</div> : null}
           </div>
         </section>
         <section className="panel">
-          <h2 className="section-title">学术前沿</h2>
+          <h2 className="section-title">英文学术前沿</h2>
           <div className="list">
             {items.academic_items.map((item) => (
               <div className="item" key={item.id}>
@@ -460,18 +460,20 @@ export default function MonitorsPage() {
                   <div className="item-title">{item.translated_title}</div>
                   <RiskBadge level={item.risk_level} />
                 </div>
+                <p className="muted">原题：{item.original_title}</p>
                 <p className="muted">{item.translated_summary}</p>
                 <div className="item-meta">
                   <span className="badge">{item.source_platform}</span>
-                  <span className="badge amber">{item.status}</span>
-                  {item.source_url ? <a className="badge" href={item.source_url} target="_blank">来源</a> : null}
+                  <span className="badge green">发布 {formatTime(item.published_at)}</span>
+                  <span className="badge">抓取 {formatTime(item.crawled_at)}</span>
                 </div>
                 <div className="toolbar" style={{ marginTop: 10, marginBottom: 0 }}>
-                  {item.topic_id ? <Link className="button blue" href={`/workspace?topic=${item.topic_id}`}>写作台</Link> : null}
-                  <button className="button" onClick={() => convertAcademic(item.id)}><ArrowRight size={17} /> 转选题</button>
+                  {item.source_url ? <a className="button blue" href={item.source_url} target="_blank"><ExternalLink size={17} /> 原文</a> : null}
+                  <button className="button" onClick={() => sendFeedback("academic-items", item.id)}>反馈不合格</button>
                 </div>
               </div>
             ))}
+            {!items.academic_items.length ? <div className="item muted">暂无 Nature News、Retraction Watch、Science News 的 72 小时内新闻。</div> : null}
           </div>
         </section>
       </div>

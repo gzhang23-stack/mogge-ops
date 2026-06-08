@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from uuid import uuid4
+from datetime import datetime, timedelta
 
 from app.database import init_db
 from app.database import SessionLocal
@@ -83,6 +84,28 @@ def cleanup_smoke_data(marker: str) -> None:
         db.close()
 
 
+def create_valid_hot_event(marker: str, title: str | None = None) -> int:
+    db = SessionLocal()
+    try:
+        item = models.ExternalHotEvent(
+            event_title=title or f"测试监控新闻：高校博士论文科研诚信进展 {marker}",
+            heat_index=92,
+            source_platform="测试新闻源",
+            source_url=f"https://example.com/news/{marker}",
+            extracted_keywords=["高校", "博士", "论文", "科研"],
+            raw_payload={
+                "published_at": (datetime.utcnow() - timedelta(hours=1)).isoformat(),
+                "crawled_at": datetime.utcnow().isoformat(),
+                "summary": f"用于验证严格监控入库和选题来源追踪。{marker}",
+            },
+        )
+        db.add(item)
+        db.commit()
+        return item.id
+    finally:
+        db.close()
+
+
 def test_health():
     init_db()
     response = client.get("/health")
@@ -96,8 +119,13 @@ def test_health():
 
 def test_generate_topics_and_workspace_flow():
     init_db()
+    marker = f"pytest-topic-{uuid4().hex[:10]}"
+    cleanup_smoke_data(marker)
+    create_valid_hot_event(marker)
     response = client.post("/topics/generate", json={"seed": "博士后出站后如何找高校岗位", "count_per_account": 1})
     assert response.status_code == 200
+    assert response.json()
+    assert response.json()[0]["source_info"]
     topic_id = response.json()[0]["id"]
 
     pack = client.post(f"/workspaces/{topic_id}/material-pack")
@@ -163,6 +191,7 @@ def test_full_operator_smoke_flow():
         monitor = client.post("/monitors/run", json={"manual_events": [f"测试热点：高校青年基金政策变化 {marker}"]})
         assert monitor.status_code == 200
         assert "academic_items_created" in monitor.json()
+        create_valid_hot_event(marker, f"测试监控新闻：高校博士论文科研诚信变化 {marker}")
 
         source = client.post(
             "/monitors/sources",
@@ -216,6 +245,7 @@ def test_full_operator_smoke_flow():
         topics = client.post("/topics/generate", json={"seed": f"青年基金政策变化 {marker}", "count_per_account": 2})
         assert topics.status_code == 200
         assert len(topics.json()) >= 1
+        assert topics.json()[0]["source_info"]
         topic_id = topics.json()[0]["id"]
 
         approve = client.post(f"/topics/{topic_id}/approve")

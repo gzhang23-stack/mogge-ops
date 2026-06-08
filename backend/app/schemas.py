@@ -115,6 +115,11 @@ class MonitorConvertRequest(BaseModel):
     column_name: str | None = None
 
 
+class FeedbackRequest(BaseModel):
+    reason: str
+    note: str = ""
+
+
 class AutomationSettingsIn(BaseModel):
     dingtalk_webhook: str = ""
     dingtalk_secret: str = ""
@@ -171,6 +176,7 @@ class TopicOut(BaseModel):
     status: TopicStatus
     historical_reference_ids: list[int]
     score: float | None = None
+    source_info: dict[str, Any] | None = None
 
 
 class MaterialPackOut(BaseModel):

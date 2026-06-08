@@ -217,6 +217,7 @@ class AcademicMonitorItem(Base, TimestampMixin):
     source_url: Mapped[str] = mapped_column(String(500), default="")
     risk_level: Mapped[RiskLevel] = mapped_column(Enum(RiskLevel), default=RiskLevel.medium)
     status: Mapped[str] = mapped_column(String(40), default="UNREAD")
+    raw_payload: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class MonitorSource(Base, TimestampMixin):

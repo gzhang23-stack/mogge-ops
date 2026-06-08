@@ -84,8 +84,8 @@ def seed_articles(db) -> None:
     items = [
         ArticleImportItem(
             account_name="募格学术",
-            title="青年基金申请书常见问题：从选题到论证如何避坑",
-            body="青年基金申请书需要关注科学问题、研究基础和可行性论证。常见问题包括目标过大、创新点不清、技术路线缺少支撑。",
+            title="历史知识库示例：基金申请书论证结构复盘",
+            body="基金申请书需要关注科学问题、研究基础和可行性论证。历史文章只用于知识库检索和风格参考，不再自动翻新为当日选题。",
             published_at=datetime.utcnow() - timedelta(days=120),
             column_name="基金项目",
             reads=18000,
@@ -104,8 +104,8 @@ def seed_articles(db) -> None:
         ),
         ArticleImportItem(
             account_name="募格学术",
-            title="近期撤稿事件给科研写作带来的提醒",
-            body="撤稿事件涉及科研诚信、数据管理和作者责任。讨论此类话题应避免未经证实的指控，使用中性表述并引用公开来源。",
+            title="历史知识库示例：科研诚信报道的事实核查方法",
+            body="科研诚信报道涉及数据管理、作者责任和公开来源核验。历史文章只作为写作参考，不代表当前热点。",
             published_at=datetime.utcnow() - timedelta(days=45),
             column_name="学术规范",
             reads=26000,
@@ -130,4 +130,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -7,14 +7,16 @@ import math
 import re
 import xml.etree.ElementTree as ET
 from collections import defaultdict
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
+from urllib.parse import quote_plus
 
 import httpx
 from bs4 import BeautifulSoup
 from markdown import markdown
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from app import models
@@ -32,6 +34,40 @@ ACADEMIC_KEYWORDS = ["论文", "投稿", "基金", "撤稿", "导师", "学术",
 RECRUIT_KEYWORDS = ["招聘", "岗位", "高校", "待遇", "编制", "求职", "人才", "简历", "面试"]
 HIGH_RISK_KEYWORDS = ["举报", "撤稿", "造假", "学术不端", "指控", "争议", "实名", "投诉"]
 MEDIUM_RISK_KEYWORDS = ["政策", "待遇", "薪资", "编制", "安家费", "具体高校", "截止时间"]
+STRICT_CHINESE_MONITOR_KEYWORDS = [
+    "撤稿",
+    "学术不端",
+    "博士",
+    "硕士",
+    "导师",
+    "博导",
+    "硕导",
+    "大学",
+    "高校",
+    "论文",
+    "科研",
+    "研究生",
+    "杰青",
+    "长江学者",
+    "院士",
+]
+STRICT_CHINESE_NEWS_SOURCES = [
+    "科学网-所有新闻",
+    "九派新闻",
+    "现代快报",
+    "大河报",
+    "华商报",
+    "澎湃新闻",
+    "扬子晚报",
+    "界面新闻",
+    "极目新闻",
+    "红星新闻",
+    "中国青年报",
+    "上游新闻",
+]
+STRICT_ENGLISH_SOURCES = {"Nature News", "Retraction Watch", "Science News"}
+DOMESTIC_NEWS_WINDOW_HOURS = 24
+ENGLISH_NEWS_WINDOW_HOURS = 72
 
 DEFAULT_MONITOR_SOURCES = [
     # 国内：科学网/中国科学报公开 RSS，适合中文学术新闻、论文、基金和人才高教。
@@ -720,13 +756,91 @@ def infer_risk(text: str) -> models.RiskLevel:
     return models.RiskLevel.low
 
 
+def _news_search_url(source_name: str) -> str:
+    keywords = " OR ".join(STRICT_CHINESE_MONITOR_KEYWORDS)
+    query = f'"{source_name}" ({keywords})'
+    return f"https://www.bing.com/news/search?q={quote_plus(query)}&format=rss&setlang=zh-CN&mkt=zh-CN"
+
+
+STRICT_DEFAULT_MONITOR_SOURCES = [
+    {
+        "name": "科学网-所有新闻",
+        "source_type": "domestic_rss",
+        "url": "http://www.sciencenet.cn/xml/news-0.aspx?news=0",
+        "credibility_level": "中国科学报社公开 RSS",
+        "account_bias": "募格学术",
+        "keywords": STRICT_CHINESE_MONITOR_KEYWORDS,
+        "notes": "科学网只保留所有新闻；入库必须命中关键词且发布时间在 24 小时内。",
+    },
+    *[
+        {
+            "name": source_name,
+            "source_type": "news_search",
+            "url": _news_search_url(source_name),
+            "credibility_level": "公开新闻搜索/RSS",
+            "account_bias": "募格学术",
+            "keywords": STRICT_CHINESE_MONITOR_KEYWORDS,
+            "notes": "中文新闻重点监控源；仅保存 24 小时内且命中关键词的原始新闻线索。",
+        }
+        for source_name in STRICT_CHINESE_NEWS_SOURCES
+        if source_name != "科学网-所有新闻"
+    ],
+    {
+        "name": "Nature News",
+        "source_type": "academic_rss",
+        "url": "https://www.nature.com/nature.rss",
+        "credibility_level": "Nature 官方 RSS",
+        "account_bias": "募格学术",
+        "keywords": ["research", "science", "university", "paper", "retraction"],
+        "notes": "英文前沿仅保留 Nature News；仅保存 72 小时内新闻并简要翻译。",
+    },
+    {
+        "name": "Retraction Watch",
+        "source_type": "academic_rss",
+        "url": "https://retractionwatch.com/feed/",
+        "credibility_level": "Retraction Watch 官方 RSS",
+        "account_bias": "募格学术",
+        "keywords": ["retraction", "misconduct", "paper", "research integrity"],
+        "notes": "撤稿与科研诚信来源；仅保存 72 小时内新闻并简要翻译。",
+    },
+    {
+        "name": "Science News",
+        "source_type": "academic_rss",
+        "url": "https://www.science.org/rss/news_current.xml",
+        "credibility_level": "Science 官方 RSS",
+        "account_bias": "募格学术",
+        "keywords": ["science", "research", "university", "paper"],
+        "notes": "英文前沿仅保留 Science News；仅保存 72 小时内新闻并简要翻译。",
+    },
+]
+
+
+def ensure_monitor_schema(db: Session) -> None:
+    try:
+        db.execute(text("SELECT raw_payload FROM academic_monitor_items LIMIT 1"))
+    except Exception:
+        db.rollback()
+        try:
+            db.execute(text("ALTER TABLE academic_monitor_items ADD COLUMN raw_payload JSON DEFAULT '{}'"))
+            db.commit()
+        except Exception:
+            db.rollback()
+
+
 def ensure_default_monitor_sources(db: Session) -> None:
     from app.database import init_db
 
     init_db()
+    ensure_monitor_schema(db)
     existing = {source.name: source for source in db.scalars(select(models.MonitorSource)).all()}
+    allowed_names = {source["name"] for source in STRICT_DEFAULT_MONITOR_SOURCES}
     changed = False
-    for source in DEFAULT_MONITOR_SOURCES:
+    for name, current in existing.items():
+        if current.source_type != "wechat_account" and name not in allowed_names:
+            current.enabled = False
+            current.notes = f"{current.notes}\n已停用：当前监控策略只保留指定中文新闻源、科学网所有新闻和三个英文前沿源。".strip()
+            changed = True
+    for source in STRICT_DEFAULT_MONITOR_SOURCES:
         current = existing.get(source["name"])
         if current:
             for key, value in source.items():
@@ -741,6 +855,10 @@ def ensure_default_monitor_sources(db: Session) -> None:
 
 
 def _existing_hot_event(db: Session, title: str, source_url: str = "") -> bool:
+    canonical = canonical_monitor_key(title, source_url)
+    for row in db.scalars(select(models.ExternalHotEvent).limit(500)).all():
+        if canonical_monitor_key(row.event_title, row.source_url) == canonical:
+            return True
     stmt = select(models.ExternalHotEvent.id).where(models.ExternalHotEvent.event_title == title)
     if source_url:
         stmt = stmt.where(models.ExternalHotEvent.source_url == source_url)
@@ -748,6 +866,10 @@ def _existing_hot_event(db: Session, title: str, source_url: str = "") -> bool:
 
 
 def _existing_academic_item(db: Session, title: str, source_url: str = "") -> bool:
+    canonical = canonical_monitor_key(title, source_url)
+    for row in db.scalars(select(models.AcademicMonitorItem).limit(500)).all():
+        if canonical_monitor_key(row.original_title, row.source_url) == canonical:
+            return True
     stmt = select(models.AcademicMonitorItem.id).where(models.AcademicMonitorItem.original_title == title)
     if source_url:
         stmt = stmt.where(models.AcademicMonitorItem.source_url == source_url)
@@ -759,6 +881,62 @@ def _rss_text(element: ET.Element, tag: str) -> str:
     if node is None:
         node = element.find(f"{{*}}{tag}")
     return (node.text or "").strip() if node is not None else ""
+
+
+def _rss_attr(element: ET.Element, tag: str, attr: str) -> str:
+    node = element.find(tag)
+    if node is None:
+        node = element.find(f"{{*}}{tag}")
+    return str(node.attrib.get(attr, "")).strip() if node is not None else ""
+
+
+def parse_source_datetime(value: str) -> datetime | None:
+    if not value:
+        return None
+    raw = value.strip()
+    try:
+        parsed = parsedate_to_datetime(raw)
+    except Exception:
+        parsed = None
+    if parsed is None:
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            parsed = None
+    if parsed is None:
+        for fmt in ("%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            try:
+                parsed = datetime.strptime(raw, fmt)
+                break
+            except ValueError:
+                continue
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def within_hours(published_at: datetime | None, hours: int) -> bool:
+    if published_at is None:
+        return False
+    now = datetime.utcnow()
+    return timedelta(0) <= now - published_at <= timedelta(hours=hours)
+
+
+def keyword_hits(text: str, keywords: list[str]) -> list[str]:
+    haystack = text.lower()
+    hits = []
+    for keyword in keywords:
+        if keyword and keyword.lower() in haystack:
+            hits.append(keyword)
+    return hits
+
+
+def canonical_monitor_key(title: str, source_url: str = "") -> str:
+    normalized_title = re.sub(r"\s+", "", title).lower()
+    normalized_url = re.sub(r"[?#].*$", "", source_url.strip().lower())
+    return normalized_url or normalized_title
 
 
 def clean_source_summary(summary: str) -> str:
@@ -790,9 +968,18 @@ def fetch_rss_items(source: models.MonitorSource, limit: int = 8) -> list[dict[s
             link_node = item.find("{http://www.w3.org/2005/Atom}link")
             link = link_node.attrib.get("href", "") if link_node is not None else ""
         summary = _rss_text(item, "description") or _rss_text(item, "summary")
-        published = _rss_text(item, "pubDate") or _rss_text(item, "updated")
+        published = _rss_text(item, "pubDate") or _rss_text(item, "updated") or _rss_text(item, "published")
+        source_name = _rss_text(item, "source") or _rss_attr(item, "source", "url")
         if title:
-            parsed.append({"title": title, "link": link, "summary": clean_source_summary(summary), "published": published})
+            parsed.append(
+                {
+                    "title": title,
+                    "link": link,
+                    "summary": clean_source_summary(summary),
+                    "published": published,
+                    "source_name": source_name,
+                }
+            )
     return parsed
 
 
@@ -1066,23 +1253,7 @@ def refresh_article_to_topic(
 
 def run_monitors(db: Session, manual_events: list[str], actor: str) -> tuple[int, int]:
     ensure_default_monitor_sources(db)
-    default_events = [
-        "青年基金申请书常见问题进入集中讨论期",
-        "高校博士后出站求职季岗位信息增加",
-        "近期撤稿事件引发科研诚信讨论",
-    ]
     hot_count = 0
-    for title in manual_events or default_events:
-        if _existing_hot_event(db, title):
-            continue
-        event = models.ExternalHotEvent(
-            event_title=title,
-            heat_index=80 if "撤稿" in title else 60,
-            source_platform="manual",
-            extracted_keywords=extract_tags(title),
-        )
-        db.add(event)
-        hot_count += 1
     academic_count = 0
     sources = db.scalars(select(models.MonitorSource).where(models.MonitorSource.enabled.is_(True))).all()
     for source in sources:
@@ -1094,49 +1265,79 @@ def run_monitors(db: Session, manual_events: list[str], actor: str) -> tuple[int
             fetched_items = fetch_rss_items(source)
         for rss_item in fetched_items:
             title = rss_item["title"]
-            if _existing_academic_item(db, title, rss_item.get("link", "")):
-                continue
-            risk = models.RiskLevel.high if "retraction" in source.name.lower() or infer_risk(title) == models.RiskLevel.high else models.RiskLevel.medium
-            translated_title = LLMClient().text_chat(
-                system="把英文科研资讯标题翻译成简洁中文，只输出标题。",
-                user=title,
-                fallback=title,
-            )
+            source_url = rss_item.get("link", "")
             summary = rss_item.get("summary") or source.notes
-            translated_summary = LLMClient().text_chat(
-                system="把科研资讯摘要整理成适合中文公众号编辑看的 80 字以内中文摘要。无法确认的事实要提示核实。",
-                user=f"标题：{title}\n摘要：{summary}",
-                fallback=summarize(summary or title, 120),
-            )
-            db.add(
-                models.AcademicMonitorItem(
-                    source_platform=source.name,
-                    original_title=title,
-                    translated_title=translated_title,
-                    translated_summary=translated_summary,
-                    source_url=rss_item.get("link", ""),
-                    risk_level=risk,
+            published_at = parse_source_datetime(rss_item.get("published", ""))
+            source_name = rss_item.get("source_name") or source.name
+            text_for_filter = f"{title} {summary} {source.name} {source_name}"
+            if source.name in STRICT_ENGLISH_SOURCES:
+                if not within_hours(published_at, ENGLISH_NEWS_WINDOW_HOURS):
+                    continue
+                if _existing_academic_item(db, title, source_url):
+                    continue
+                risk = models.RiskLevel.high if "retraction" in source.name.lower() or infer_risk(title) == models.RiskLevel.high else models.RiskLevel.medium
+                translated_title = LLMClient().text_chat(
+                    system="把英文科研资讯标题翻译成简洁中文，只输出标题。",
+                    user=title,
+                    fallback=title,
                 )
-            )
-            academic_count += 1
-    if academic_count == 0:
-        academic_samples = [
-            ("Nature", "New discussion on research integrity in labs", "实验室科研诚信的新讨论"),
-            ("RetractionWatch", "Paper retraction raises questions about peer review", "论文撤稿引发同行评议问题讨论"),
-        ]
-        for platform, original, translated in academic_samples:
-            if _existing_academic_item(db, original):
+                translated_summary = LLMClient().text_chat(
+                    system="把科研资讯摘要整理成适合中文公众号编辑看的 80 字以内中文摘要。无法确认的事实要提示核实。",
+                    user=f"标题：{title}\n摘要：{summary}",
+                    fallback=summarize(summary or title, 120),
+                )
+                db.add(
+                    models.AcademicMonitorItem(
+                        source_platform=source.name,
+                        original_title=title,
+                        translated_title=translated_title,
+                        translated_summary=translated_summary,
+                        source_url=source_url,
+                        risk_level=risk,
+                        raw_payload={
+                            "published_at": published_at.isoformat(),
+                            "crawled_at": datetime.utcnow().isoformat(),
+                            "source_name": source_name,
+                            "source_type": source.source_type,
+                            "source_summary": summary,
+                            "time_window_hours": ENGLISH_NEWS_WINDOW_HOURS,
+                        },
+                    )
+                )
+                academic_count += 1
                 continue
-            item = models.AcademicMonitorItem(
-                source_platform=platform,
-                original_title=original,
-                translated_title=translated,
-                translated_summary=f"{translated}，适合转化为科研生态观察或学术规范文章。",
-                risk_level=models.RiskLevel.high if platform == "RetractionWatch" else models.RiskLevel.medium,
+
+            hits = keyword_hits(text_for_filter, STRICT_CHINESE_MONITOR_KEYWORDS)
+            if not hits:
+                continue
+            if not within_hours(published_at, DOMESTIC_NEWS_WINDOW_HOURS):
+                continue
+            if _existing_hot_event(db, title, source_url):
+                continue
+            risk = infer_risk(text_for_filter)
+            heat = 45 + min(35, len(hits) * 7)
+            if risk == models.RiskLevel.high:
+                heat += 15
+            event = models.ExternalHotEvent(
+                event_title=title,
+                heat_index=min(100, heat),
+                source_platform=source_name or source.name,
+                source_url=source_url,
+                extracted_keywords=hits,
+                raw_payload={
+                    "published_at": published_at.isoformat(),
+                    "crawled_at": datetime.utcnow().isoformat(),
+                    "configured_source": source.name,
+                    "source_name": source_name,
+                    "summary": summary,
+                    "risk_level": risk.value,
+                    "time_window_hours": DOMESTIC_NEWS_WINDOW_HOURS,
+                },
             )
-            db.add(item)
-            academic_count += 1
-    audit(db, actor, "monitors.run", "monitor", payload={"hot": hot_count, "academic": academic_count})
+            db.add(event)
+            hot_count += 1
+    manual_count = len([item for item in manual_events if item.strip()])
+    audit(db, actor, "monitors.run", "monitor", payload={"hot": hot_count, "academic": academic_count, "manual_ignored": manual_count})
     db.commit()
     return hot_count, academic_count
 
@@ -1172,6 +1373,7 @@ def _topic_from_monitor(
         recommendation_reason=reason,
         risk_level=risk,
         historical_reference_ids=refs,
+        source_event_id=item_id if item_type == "hot_event" else -item_id,
         recommended_publish_at=datetime.utcnow() + timedelta(days=1),
     )
     db.add(topic)
@@ -1195,12 +1397,13 @@ def convert_hot_event_to_topic(
         raise ValueError("Hot event not found")
     account = target_account or infer_account(event.event_title, " ".join(event.extracted_keywords))
     risk = infer_risk(event.event_title)
+    published_at = hot_event_published_at(event)
     return _topic_from_monitor(
         db,
         title=event.event_title if account == "募格学术" else f"{event.event_title}对博士求职有什么影响",
         target_account=account,
         angle="从热点事件拆解目标读者关心的背景、机会、风险和行动建议。",
-        reason=f"来自 {event.source_platform} 监控，热度 {event.heat_index}。",
+        reason=f"来自监控热点：{event.source_platform}；发布时间：{format_dt(published_at)}；抓取时间：{format_dt(event.created_at)}；热度 {event.heat_index}。",
         risk=risk,
         actor=actor,
         item_type="hot_event",
@@ -1221,12 +1424,13 @@ def convert_academic_item_to_topic(
         raise ValueError("Academic monitor item not found")
     account = target_account or "募格学术"
     title = item.translated_title or item.original_title
+    published_at = academic_item_published_at(item)
     topic = _topic_from_monitor(
         db,
         title=title,
         target_account=account,
         angle="从学术前沿、科研规范或科研生态角度转化为中文公众号选题。",
-        reason=f"来自 {item.source_platform} 前沿监控，需核实原始来源。",
+        reason=f"来自监控热点：{item.source_platform}；发布时间：{format_dt(published_at)}；抓取时间：{format_dt(item.created_at)}；需核实原始来源。",
         risk=item.risk_level,
         actor=actor,
         item_type="academic_item",
@@ -1266,6 +1470,7 @@ def add_wechat_monitor_accounts(db: Session, accounts: list[WechatMonitorAccount
 
 
 def import_wechat_monitor_articles(db: Session, items: list[WechatArticleMonitorItem], actor: str) -> int:
+    ensure_monitor_schema(db)
     count = 0
     for item in items:
         platform = f"微信公众号:{item.account_name}"
@@ -1328,56 +1533,55 @@ def _topic_candidates_from_seed(raw: str, source: str) -> list[dict[str, str]]:
     return [
         {
             "account": "募格学术",
-            "title": f"{base}：科研人需要核实的 3 个关键问题",
-            "angle": "从事实核查、学术规范、科研生态影响三个层面拆解。",
-            "reason": f"来自{source}，适合做学术观察和风险提示。",
+            "title": f"{base}：科研群体需要核实的事实与影响",
+            "angle": "围绕已监控到的新闻事实、来源可靠性、科研生态影响和读者行动建议展开。",
+            "reason": f"来自真实监控热点：{source}。",
         },
         {
             "account": "募格学术",
             "title": f"从{base}看科研评价和学术规范的新变化",
-            "angle": "把单点新闻转成科研评价、论文发表、实验室治理或学术规范议题。",
-            "reason": f"来自{source}，可延展成深度分析稿。",
+            "angle": "只基于监控新闻做延展，避免把历史经验当成当日热点。",
+            "reason": f"来自真实监控热点：{source}。",
         },
         {
             "account": "募格科聘",
             "title": f"{base}会影响博士、博士后和青年教师的哪些选择",
-            "angle": "从求职、岗位判断、职业路径和信息核实角度切入。",
-            "reason": f"来自{source}，适合转成求职判断清单。",
+            "angle": "从求职、岗位判断、职业路径和信息核实角度切入，但必须回到原新闻和官方信息核验。",
+            "reason": f"来自真实监控热点：{source}。",
         },
         {
             "account": "募格科聘",
             "title": f"围绕{base}，高校人才求职者要提前问清什么",
             "angle": "聚焦岗位条件、待遇承诺、编制、截止时间和官方来源核验。",
-            "reason": f"来自{source}，可服务正在找岗位的读者。",
+            "reason": f"来自真实监控热点：{source}。",
         },
     ]
 
 
 def generate_topics(db: Session, seed: str | None, count_per_account: int, actor: str) -> list[models.Topic]:
-    seed_sources: list[tuple[str, str]] = []
-    if seed:
-        seed_sources.append((seed, "手动输入"))
+    seed_sources: list[tuple[str, str, str, int]] = []
+    hot_events, academic_items = monitor_result_candidates(db, 20, 10)
     seed_sources.extend(
-        (event.event_title, f"热点监控/{event.source_platform}")
-        for event in db.scalars(select(models.ExternalHotEvent).order_by(models.ExternalHotEvent.id.desc()).limit(8))
+        (
+            event.event_title,
+            f"{event.source_platform} / 发布时间 {format_dt(hot_event_published_at(event))} / 抓取 {format_dt(event.created_at)}",
+            "hot_event",
+            event.id,
+        )
+        for event in hot_events
     )
     seed_sources.extend(
-        (item.translated_title, f"学术前沿/{item.source_platform}")
-        for item in db.scalars(select(models.AcademicMonitorItem).order_by(models.AcademicMonitorItem.id.desc()).limit(8))
+        (
+            item.translated_title,
+            f"{item.source_platform} / 发布时间 {format_dt(academic_item_published_at(item))} / 抓取 {format_dt(item.created_at)}",
+            "academic_item",
+            item.id,
+        )
+        for item in academic_items
     )
-    seed_sources.extend(
-        (article.title, f"历史文章/{article.account_name}")
-        for article in db.scalars(select(models.HistoricalArticle).order_by(models.HistoricalArticle.id.desc()).limit(8))
-    )
-    if not seed_sources:
-        seed_sources = [
-            ("青年基金申请书常见问题", "默认样本"),
-            ("博士后出站后如何找高校岗位", "默认样本"),
-            ("近期撤稿事件反思", "默认样本"),
-        ]
     generated: list[models.Topic] = []
     seen: set[tuple[str, str]] = set()
-    for raw, source in seed_sources:
+    for raw, source, item_type, item_id in seed_sources:
         for candidate in _topic_candidates_from_seed(raw, source):
             account = candidate["account"]
             if len([topic for topic in generated if topic.target_account == account]) >= count_per_account:
@@ -1396,12 +1600,14 @@ def generate_topics(db: Session, seed: str | None, count_per_account: int, actor
                 recommendation_reason=candidate["reason"],
                 risk_level=risk,
                 historical_reference_ids=refs,
+                source_event_id=item_id if item_type == "hot_event" else -item_id,
                 recommended_publish_at=datetime.utcnow() + timedelta(days=len(generated) + 1),
             )
             db.add(topic)
             db.flush()
             scores = score_topic(title, risk, account)
             db.add(models.TopicScore(topic_id=topic.id, **scores))
+            db.add(models.MonitorConversion(item_type=item_type, item_id=item_id, topic_id=topic.id, actor=actor))
             generated.append(topic)
         if all(len([topic for topic in generated if topic.target_account == account]) >= count_per_account for account in ["募格学术", "募格科聘"]):
             break
@@ -1424,6 +1630,100 @@ def select_pushable_topics(db: Session, limit: int | None = None, threshold: flo
         .limit(topic_limit)
     ).all()
     return [(topic, float(score or 0)) for topic, score in rows]
+
+
+def topic_source_info(db: Session, topic: models.Topic) -> dict[str, Any] | None:
+    conversion = db.scalars(select(models.MonitorConversion).where(models.MonitorConversion.topic_id == topic.id)).first()
+    item_type = conversion.item_type if conversion else ("hot_event" if (topic.source_event_id or 0) > 0 else "academic_item")
+    item_id = conversion.item_id if conversion else abs(topic.source_event_id or 0)
+    if not item_id:
+        return None
+    if item_type == "hot_event":
+        item = db.get(models.ExternalHotEvent, item_id)
+        if not item:
+            return None
+        return {
+            "item_type": "hot_event",
+            "item_id": item.id,
+            "title": item.event_title,
+            "source": item.source_platform,
+            "source_url": item.source_url,
+            "published_at": hot_event_published_at(item).isoformat() if hot_event_published_at(item) else None,
+            "crawled_at": item.created_at.isoformat() if item.created_at else None,
+            "valid": is_valid_hot_event(item),
+        }
+    item = db.get(models.AcademicMonitorItem, item_id)
+    if not item:
+        return None
+    return {
+        "item_type": "academic_item",
+        "item_id": item.id,
+        "title": item.translated_title or item.original_title,
+        "source": item.source_platform,
+        "source_url": item.source_url,
+        "published_at": academic_item_published_at(item).isoformat() if academic_item_published_at(item) else None,
+        "crawled_at": item.created_at.isoformat() if item.created_at else None,
+        "valid": is_valid_academic_item(item),
+    }
+
+
+def cleanup_unsupported_topics(db: Session, actor: str = "system") -> dict[str, int]:
+    inspected = 0
+    discarded = 0
+    for topic in db.scalars(select(models.Topic).where(models.Topic.status != models.TopicStatus.discarded)).all():
+        inspected += 1
+        source_info = topic_source_info(db, topic)
+        if source_info and source_info.get("valid"):
+            continue
+        topic.status = models.TopicStatus.discarded
+        if "无有效监控热点支撑" not in topic.recommendation_reason:
+            topic.recommendation_reason = f"{topic.recommendation_reason}\n[系统自检] 无有效监控热点支撑，已标记为放弃。"
+        discarded += 1
+    audit(db, actor, "topics.cleanup_unsupported", "topics", payload={"inspected": inspected, "discarded": discarded})
+    db.commit()
+    return {"inspected": inspected, "discarded": discarded}
+
+
+def record_monitor_feedback(db: Session, item_type: str, item_id: int, reason: str, note: str, actor: str) -> dict[str, Any]:
+    payload = {
+        "reason": reason,
+        "note": note,
+        "actor": actor,
+        "created_at": datetime.utcnow().isoformat(),
+    }
+    if item_type == "hot_event":
+        item = db.get(models.ExternalHotEvent, item_id)
+        if not item:
+            raise ValueError("Hot event not found")
+        raw = dict(item.raw_payload) if isinstance(item.raw_payload, dict) else {}
+        raw["feedback"] = payload
+        raw["hidden_by_feedback"] = True
+        item.raw_payload = raw
+    elif item_type == "academic_item":
+        item = db.get(models.AcademicMonitorItem, item_id)
+        if not item:
+            raise ValueError("Academic monitor item not found")
+        raw = dict(getattr(item, "raw_payload", {})) if isinstance(getattr(item, "raw_payload", {}), dict) else {}
+        raw["feedback"] = payload
+        raw["hidden_by_feedback"] = True
+        item.raw_payload = raw
+        item.status = "REJECTED"
+    else:
+        raise ValueError("Unsupported monitor item type")
+    audit(db, actor, "monitors.feedback", item_type, str(item_id), payload)
+    db.commit()
+    return {"ok": True, "item_type": item_type, "item_id": item_id}
+
+
+def record_topic_feedback(db: Session, topic_id: int, reason: str, note: str, actor: str) -> dict[str, Any]:
+    topic = db.get(models.Topic, topic_id)
+    if not topic:
+        raise ValueError("Topic not found")
+    topic.status = models.TopicStatus.discarded
+    topic.recommendation_reason = f"{topic.recommendation_reason}\n[用户反馈] {reason}：{note}".strip()
+    audit(db, actor, "topics.feedback", "topics", str(topic_id), {"reason": reason, "note": note})
+    db.commit()
+    return {"ok": True, "topic_id": topic_id}
 
 
 def render_dingtalk_topics(topics: list[tuple[models.Topic, float]]) -> str:
@@ -1527,14 +1827,107 @@ def render_breaking_news_markdown(title: str, summary: str, source: str, judgmen
     )
 
 
+def _payload_datetime(payload: dict[str, Any] | None, key: str = "published_at") -> datetime | None:
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get(key)
+    if not value:
+        return None
+    return parse_source_datetime(str(value))
+
+
+def hot_event_published_at(item: models.ExternalHotEvent) -> datetime | None:
+    return _payload_datetime(item.raw_payload)
+
+
+def academic_item_published_at(item: models.AcademicMonitorItem) -> datetime | None:
+    return _payload_datetime(getattr(item, "raw_payload", {}) or {})
+
+
+def is_valid_hot_event(item: models.ExternalHotEvent) -> bool:
+    if isinstance(item.raw_payload, dict) and item.raw_payload.get("hidden_by_feedback"):
+        return False
+    if not within_hours(hot_event_published_at(item), DOMESTIC_NEWS_WINDOW_HOURS):
+        return False
+    text_value = f"{item.event_title} {' '.join(item.extracted_keywords)} {item.raw_payload.get('summary', '') if isinstance(item.raw_payload, dict) else ''}"
+    return bool(keyword_hits(text_value, STRICT_CHINESE_MONITOR_KEYWORDS))
+
+
+def is_valid_academic_item(item: models.AcademicMonitorItem) -> bool:
+    raw = getattr(item, "raw_payload", {}) or {}
+    if isinstance(raw, dict) and raw.get("hidden_by_feedback"):
+        return False
+    return item.source_platform in STRICT_ENGLISH_SOURCES and within_hours(academic_item_published_at(item), ENGLISH_NEWS_WINDOW_HOURS)
+
+
+def format_dt(value: datetime | None) -> str:
+    return value.strftime("%Y-%m-%d %H:%M") if value else "未知"
+
+
+def monitor_result_candidates(db: Session, hot_limit: int = 20, academic_limit: int = 10) -> tuple[list[models.ExternalHotEvent], list[models.AcademicMonitorItem]]:
+    ensure_monitor_schema(db)
+    hot_events = [
+        item
+        for item in db.scalars(select(models.ExternalHotEvent).order_by(models.ExternalHotEvent.id.desc()).limit(200)).all()
+        if is_valid_hot_event(item)
+    ]
+    academic_items = [
+        item
+        for item in db.scalars(select(models.AcademicMonitorItem).order_by(models.AcademicMonitorItem.id.desc()).limit(200)).all()
+        if is_valid_academic_item(item)
+    ]
+    hot_events.sort(key=lambda item: (item.heat_index, hot_event_published_at(item) or datetime.min), reverse=True)
+    academic_items.sort(key=lambda item: (academic_item_published_at(item) or datetime.min), reverse=True)
+    return hot_events[:hot_limit], academic_items[:academic_limit]
+
+
+def render_monitor_digest_markdown(hot_events: list[models.ExternalHotEvent], academic_items: list[models.AcademicMonitorItem]) -> str:
+    if not hot_events and not academic_items:
+        return "### 募格监控结果\n\n本轮没有符合硬性条件的新增新闻：中文需命中关键词且发布时间在 24 小时内，英文仅保留 Nature News、Retraction Watch、Science News 的 72 小时内新闻。"
+    lines = ["### 募格监控结果", "", "以下为本轮保留的第一手热点新闻线索，不是 AI 生成选题。", ""]
+    if hot_events:
+        lines.extend(["#### 中文新闻", ""])
+        for idx, item in enumerate(hot_events[:10], start=1):
+            published_at = hot_event_published_at(item)
+            summary = item.raw_payload.get("summary", "") if isinstance(item.raw_payload, dict) else ""
+            lines.extend(
+                [
+                    f"**{idx}. {item.event_title}**",
+                    f"- 来源：{item.source_platform}",
+                    f"- 发布时间：{format_dt(published_at)}",
+                    f"- 关键词：{'、'.join(item.extracted_keywords)}",
+                    f"- 重要性：{item.heat_index}/100",
+                    f"- 链接：{item.source_url or '无'}",
+                    f"- 摘要：{summarize(summary, 120) if summary else '暂无摘要，请打开原文核实。'}",
+                    "",
+                ]
+            )
+    if academic_items:
+        lines.extend(["#### 英文学术前沿", ""])
+        for idx, item in enumerate(academic_items[:5], start=1):
+            published_at = academic_item_published_at(item)
+            lines.extend(
+                [
+                    f"**{idx}. {item.translated_title}**",
+                    f"- 来源：{item.source_platform}",
+                    f"- 发布时间：{format_dt(published_at)}",
+                    f"- 原题：{item.original_title}",
+                    f"- 链接：{item.source_url or '无'}",
+                    f"- 摘要：{item.translated_summary}",
+                    "",
+                ]
+            )
+    lines.append("> 如发现旧闻、来源错误或不符合关键词，请在后台监控页点“反馈不合格”，系统会记录并隐藏该条。")
+    return "\n".join(lines)
+
+
 def push_breaking_news_from_monitors(db: Session, actor: str = "scheduler") -> dict[str, Any]:
     settings = automation.get_raw_settings(db)
     if not automation.push_allowed_now(settings):
         return {"pushed": 0, "skipped": "quiet_hours"}
     pushed = 0
     notifier = DingTalkNotifier(settings)
-    hot_events = db.scalars(select(models.ExternalHotEvent).order_by(models.ExternalHotEvent.id.desc()).limit(40)).all()
-    academic_items = db.scalars(select(models.AcademicMonitorItem).order_by(models.AcademicMonitorItem.id.desc()).limit(80)).all()
+    hot_events, academic_items = monitor_result_candidates(db, 40, 40)
     candidates: list[tuple[str, int, str, str, str, int, models.RiskLevel]] = []
     candidates.extend(
         ("hot_event", item.id, item.event_title, " ".join(item.extracted_keywords), item.source_platform, item.heat_index, infer_risk(item.event_title))
@@ -1570,11 +1963,10 @@ def run_monitor_pipeline(db: Session, actor: str = "scheduler") -> dict[str, Any
     auto_settings = automation.get_raw_settings(db)
     hot_count, academic_count = run_monitors(db, [], actor)
     breaking_result = push_breaking_news_from_monitors(db, actor)
-    topics = generate_topics(db, None, max(1, int(auto_settings.get("push_topic_limit") or 8) // 2), actor)
-    pushable = select_pushable_topics(db)
-    markdown_text = render_dingtalk_topics(pushable)
+    hot_events, academic_items = monitor_result_candidates(db)
+    markdown_text = render_monitor_digest_markdown(hot_events, academic_items)
     if automation.push_allowed_now(auto_settings):
-        push_result = DingTalkNotifier(auto_settings).send_markdown("募格监控选题提醒", markdown_text)
+        push_result = DingTalkNotifier(auto_settings).send_markdown("募格监控新闻提醒", markdown_text)
     else:
         push_result = {"ok": False, "reason": "quiet_hours"}
     audit(
@@ -1585,8 +1977,7 @@ def run_monitor_pipeline(db: Session, actor: str = "scheduler") -> dict[str, Any
         payload={
             "hot_events_created": hot_count,
             "academic_items_created": academic_count,
-            "topics_generated": len(topics),
-            "topics_pushed": len(pushable),
+            "monitor_items_pushed": len(hot_events) + len(academic_items),
             "breaking_result": breaking_result,
             "push_result": push_result,
         },
@@ -1595,8 +1986,9 @@ def run_monitor_pipeline(db: Session, actor: str = "scheduler") -> dict[str, Any
     return {
         "hot_events_created": hot_count,
         "academic_items_created": academic_count,
-        "topics_generated": len(topics),
-        "topics_pushed": len(pushable),
+        "topics_generated": 0,
+        "topics_pushed": 0,
+        "monitor_items_pushed": len(hot_events) + len(academic_items),
         "breaking_result": breaking_result,
         "push_result": push_result,
     }
@@ -2155,7 +2547,7 @@ def build_operation_report(db: Session, period: str, account: str = "全部") ->
         account_name=account,
         summary=f"{period} 运营复盘已生成：重点看账号表现、栏目效率、标题结构、分享率和关注转化。",
         insights=insights,
-        next_topics=top_topics or ["青年基金申请书常见问题", "博士后出站后的职业选择"],
+        next_topics=top_topics or ["从最新监控热点中筛选科研诚信与高校人才议题", "基于真实新闻来源复盘下一轮内容方向"],
         metrics_snapshot={
             "totals": totals,
             "by_account": account_rows,
