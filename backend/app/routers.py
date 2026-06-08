@@ -89,7 +89,7 @@ def dashboard(db: Session = Depends(get_db)) -> schemas.DashboardOut:
     return schemas.DashboardOut(
         accounts=db.scalar(select(func.count(models.WechatAccount.id))) or 0,
         articles=db.scalar(select(func.count(models.HistoricalArticle.id))) or 0,
-        topics=db.scalar(select(func.count(models.Topic.id))) or 0,
+        topics=db.scalar(select(func.count(models.Topic.id)).where(models.Topic.status != models.TopicStatus.discarded)) or 0,
         drafts=db.scalar(select(func.count(models.Draft.id))) or 0,
         pending_reviews=db.scalar(
             select(func.count(func.distinct(models.ReviewTask.draft_id))).where(models.ReviewTask.status == models.ReviewStatus.pending)
@@ -124,7 +124,7 @@ def quick_topics(
     actor: dict[str, str] = Depends(require_permission("topics:generate")),
 ) -> dict:
     topics = services.generate_topics(db, None, 3, actor["user"])
-    existing = db.scalar(select(func.count(models.Topic.id))) or 0
+    existing = db.scalar(select(func.count(models.Topic.id)).where(models.Topic.status != models.TopicStatus.discarded)) or 0
     return {
         "topics_generated": len(topics),
         "topics_total": existing,
@@ -141,7 +141,7 @@ def system_status(db: Session = Depends(get_db)) -> dict:
         "accounts": db.scalar(select(func.count(models.WechatAccount.id))) or 0,
         "articles": db.scalar(select(func.count(models.HistoricalArticle.id))) or 0,
         "monitor_sources": db.scalar(select(func.count(models.MonitorSource.id)).where(models.MonitorSource.enabled.is_(True))) or 0,
-        "topics": db.scalar(select(func.count(models.Topic.id))) or 0,
+        "topics": db.scalar(select(func.count(models.Topic.id)).where(models.Topic.status != models.TopicStatus.discarded)) or 0,
         "approved_topics": db.scalar(select(func.count(models.Topic.id)).where(models.Topic.status == models.TopicStatus.approved)) or 0,
         "drafts": db.scalar(select(func.count(models.Draft.id))) or 0,
         "pending_reviews": db.scalar(select(func.count(func.distinct(models.ReviewTask.draft_id))).where(models.ReviewTask.status == models.ReviewStatus.pending)) or 0,
