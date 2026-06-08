@@ -48,5 +48,6 @@ jobs:
           npm run build
 
           pkill -f "serve .*frontend/out" || true
-          nohup npx serve /opt/mogge-ops/frontend/out -l 3000 > /opt/mogge-ops/frontend/frontend.log 2>&1 &
+          pkill -f "http.server 3000.*frontend/out" || true
+          nohup python3 -m http.server 3000 --directory /opt/mogge-ops/frontend/out > /opt/mogge-ops/frontend/frontend.log 2>&1 &
           EOF
