@@ -49,5 +49,22 @@ jobs:
 
           pkill -f "serve .*frontend/out" || true
           pkill -f "http.server 3000.*frontend/out" || true
-          nohup python3 -m http.server 3000 --directory /opt/mogge-ops/frontend/out > /opt/mogge-ops/frontend/frontend.log 2>&1 &
+
+          cat > /etc/caddy/Caddyfile <<'CADDY'
+          we.diqiuliulang.com {
+              handle_path /api/* {
+                  reverse_proxy 127.0.0.1:8000
+              }
+
+              root * /opt/mogge-ops/frontend/out
+              try_files {path} {path}/index.html /index.html
+              file_server
+          }
+
+          api.diqiuliulang.com {
+              reverse_proxy 127.0.0.1:8000
+          }
+          CADDY
+          caddy fmt --overwrite /etc/caddy/Caddyfile
+          systemctl reload caddy
           EOF
