@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Bell, ChevronDown, ChevronUp, ExternalLink, Plus, RadioTower, RefreshCw } from "lucide-react";
+import { Bell, ChevronDown, ChevronUp, ExternalLink, Link as LinkIcon, Plus, RadioTower, RefreshCw } from "lucide-react";
 import { apiGet, apiPost, apiPut, AutomationSettings, MonitorItems, MonitorSource } from "@/lib/api";
 import { PageHeader, RiskBadge } from "@/components/Ui";
 
@@ -9,7 +9,7 @@ const sourceQuality = [
   { title: "中文硬条件", body: "必须命中关键词，且新闻发布时间在 24 小时内；抓取时间不能替代发布时间。" },
   { title: "科学网收口", body: "科学网只保留“所有新闻”，其他科学网细分源会自动停用。" },
   { title: "英文收口", body: "英文只保留 Nature News、Retraction Watch、Science News，窗口为 72 小时。" },
-  { title: "只看新闻", body: "监控页展示和推送第一手新闻线索，不自动生成选题。" },
+  { title: "免费社交线索", body: "公众号、抖音、小红书等用公开链接收件箱，不用付费接口，不模拟登录。" },
 ];
 
 function formatTime(value?: string | null) {
@@ -18,20 +18,22 @@ function formatTime(value?: string | null) {
 }
 
 export default function MonitorsPage() {
-  const [items, setItems] = useState<MonitorItems>({ hot_events: [], academic_items: [] });
+  const [items, setItems] = useState<MonitorItems>({ hot_events: [], academic_items: [], social_clues: [], feedback_items: [] });
   const [sources, setSources] = useState<MonitorSource[]>([]);
   const [scheduler, setScheduler] = useState<{ enabled: boolean; running: boolean; interval_minutes: number; dingtalk_configured: boolean } | null>(null);
   const [settings, setSettings] = useState<AutomationSettings | null>(null);
   const [newSourceName, setNewSourceName] = useState("");
   const [newSourceUrl, setNewSourceUrl] = useState("");
   const [wechatBatch, setWechatBatch] = useState("学术志\n科研圈\n知识分子");
+  const [linkInboxText, setLinkInboxText] = useState("学术圈线索标题 https://mp.weixin.qq.com/s/example\n抖音线索 https://v.douyin.com/example\n小红书线索 https://xhslink.com/example");
+  const [linkInboxSource, setLinkInboxSource] = useState("钉钉报料群");
+  const [linkInboxMajor, setLinkInboxMajor] = useState(false);
   const [dingtalkSecret, setDingtalkSecret] = useState("");
   const [message, setMessage] = useState("");
   const [showGuide, setShowGuide] = useState(false);
   const [showDisabledSources, setShowDisabledSources] = useState(false);
   const enabledSources = sources.filter((source) => source.enabled);
   const disabledSources = sources.filter((source) => !source.enabled);
-  const sourceTypes = Array.from(new Set(sources.map((source) => source.source_type))).length;
 
   async function load() {
     const [monitorItems, monitorSources, automationSettings] = await Promise.all([
@@ -129,7 +131,19 @@ export default function MonitorsPage() {
     await load();
   }
 
-  async function sendFeedback(itemType: "hot-events" | "academic-items", id: number) {
+  async function importLinkInbox() {
+    if (!linkInboxText.trim()) return;
+    const result = await apiPost<{ created: number; skipped: number }>("/monitors/link-inbox", {
+      text: linkInboxText,
+      source_name: linkInboxSource || "人工报料",
+      mark_as_major: linkInboxMajor,
+      fetch_metadata: true
+    });
+    setMessage(`公开链接收件箱已导入 ${result.created} 条，重复跳过 ${result.skipped} 条；无发布时间的线索会标记为待核实。`);
+    await load();
+  }
+
+  async function sendFeedback(itemType: "hot-events" | "academic-items" | "social-clues", id: number) {
     await apiPost(`/monitors/${itemType}/${id}/feedback`, {
       reason: "不符合监控硬性要求",
       note: "页面反馈：疑似旧闻、关键词不符、来源或发布时间异常。"
@@ -208,8 +222,8 @@ export default function MonitorsPage() {
       <section className="grid cols-4" style={{ marginBottom: 14 }}>
         <div className="metric"><div className="label">内置源</div><div className="value">{sources.length}</div></div>
         <div className="metric"><div className="label">启用源</div><div className="value">{enabledSources.length}</div></div>
-        <div className="metric"><div className="label">来源类型</div><div className="value">{sourceTypes}</div></div>
-        <div className="metric"><div className="label">前沿条目</div><div className="value">{items.academic_items.length}</div></div>
+        <div className="metric"><div className="label">社交线索</div><div className="value">{items.social_clues.length}</div></div>
+        <div className="metric"><div className="label">反馈记录</div><div className="value">{items.feedback_items.length}</div></div>
       </section>
       {settings ? (
         <section className="panel" style={{ marginBottom: 14 }}>
@@ -382,6 +396,44 @@ export default function MonitorsPage() {
         <div className="toast">{message}</div>
       </section>
       <section className="panel" style={{ marginTop: 14 }}>
+        <h2 className="section-title">公开链接收件箱</h2>
+        <div className="grid cols-2">
+          <label>
+            <div className="field-label">批量粘贴公众号 / 抖音 / 小红书 / 视频号 / 微博链接</div>
+            <textarea
+              className="textarea"
+              value={linkInboxText}
+              onChange={(e) => setLinkInboxText(e.target.value)}
+              placeholder={"每行一条：标题 + 链接\n例如：某高校博士事件引发讨论 https://mp.weixin.qq.com/s/xxxx"}
+            />
+          </label>
+          <div className="item">
+            <div className="item-title">免费方案的用法</div>
+            <p className="muted">
+              这些平台不提供稳定免费的全量监控 API。看到内容后，把公开链接转发到钉钉群或粘贴到这里，系统会自动识别平台、去重、匹配学术关键词，并标注是否需要核实发布时间。
+            </p>
+            <div className="grid cols-2" style={{ marginTop: 10 }}>
+              <label>
+                <div className="field-label">线索来源</div>
+                <input className="input" value={linkInboxSource} onChange={(e) => setLinkInboxSource(e.target.value)} />
+              </label>
+              <label>
+                <div className="field-label">重大线索</div>
+                <select className="select" value={linkInboxMajor ? "yes" : "no"} onChange={(e) => setLinkInboxMajor(e.target.value === "yes")}>
+                  <option value="no">普通摘要推送</option>
+                  <option value="yes">参与重大新闻即时判断</option>
+                </select>
+              </label>
+            </div>
+            <div className="toolbar" style={{ marginTop: 12, marginBottom: 0 }}>
+              <button className="button primary" onClick={importLinkInbox}><LinkIcon size={17} /> 导入公开链接</button>
+              <span className="badge amber">无发布时间则待核实</span>
+              <span className="badge green">不生成选题</span>
+            </div>
+          </div>
+        </div>
+      </section>
+      <section className="panel" style={{ marginTop: 14 }}>
         <h2 className="section-title">微信公众号监控</h2>
         <div className="grid cols-2">
           <label>
@@ -503,6 +555,64 @@ export default function MonitorsPage() {
               </div>
             ))}
             {!items.academic_items.length ? <div className="item muted">暂无 Nature News、Retraction Watch、Science News 的 72 小时内新闻。</div> : null}
+          </div>
+        </section>
+      </div>
+      <div className="grid cols-2" style={{ marginTop: 14 }}>
+        <section className="panel">
+          <h2 className="section-title">社交平台线索</h2>
+          <div className="list">
+            {items.social_clues.map((item) => (
+              <div className="item" key={item.id}>
+                <div className="item-head">
+                  <div className="item-title">{item.event_title}</div>
+                  <span className={`badge ${item.published_at ? "green" : "amber"}`}>
+                    {item.published_at ? "已解析时间" : "发布时间待核实"}
+                  </span>
+                </div>
+                {item.summary ? <p className="muted">{item.summary}</p> : null}
+                <div className="item-meta">
+                  <span className="badge">{item.source_platform}</span>
+                  <span className="badge">{item.source_name}</span>
+                  <span className="badge green">发布 {formatTime(item.published_at)}</span>
+                  <span className="badge">录入 {formatTime(item.crawled_at)}</span>
+                  <span className="badge amber">可信度 {item.confidence_level}</span>
+                  <span className="badge">{item.recommended_action}</span>
+                  {item.keywords.length ? item.keywords.map((keyword) => <span className="badge green" key={keyword}>{keyword}</span>) : <span className="badge amber">人工报料待判断</span>}
+                </div>
+                <div className="toolbar" style={{ marginTop: 10, marginBottom: 0 }}>
+                  {item.source_url ? <a className="button blue" href={item.source_url} target="_blank"><ExternalLink size={17} /> 原文</a> : null}
+                  <button className="button" onClick={() => sendFeedback("social-clues", item.id)}>反馈不合格</button>
+                  {item.mark_as_major ? <span className="badge red">重大线索</span> : null}
+                </div>
+              </div>
+            ))}
+            {!items.social_clues.length ? <div className="item muted">暂无公众号、抖音、小红书等公开链接线索。可在上方“公开链接收件箱”批量粘贴。</div> : null}
+          </div>
+        </section>
+        <section className="panel">
+          <h2 className="section-title">待处理反馈</h2>
+          <div className="list">
+            {items.feedback_items.map((item) => (
+              <div className="item" key={`${item.item_type}-${item.id}`}>
+                <div className="item-head">
+                  <div className="item-title">{item.title}</div>
+                  <span className="badge amber">{item.reason}</span>
+                </div>
+                <p className="muted">{item.note || "已记录反馈，后续同类内容会降低可信度或隐藏。"}</p>
+                <div className="item-meta">
+                  <span className="badge">{item.source}</span>
+                  <span className="badge">{item.item_type}</span>
+                  <span className="badge">反馈 {formatTime(item.created_at)}</span>
+                </div>
+                {item.source_url ? (
+                  <div className="toolbar" style={{ marginTop: 10, marginBottom: 0 }}>
+                    <a className="button blue" href={item.source_url} target="_blank"><ExternalLink size={17} /> 原文</a>
+                  </div>
+                ) : null}
+              </div>
+            ))}
+            {!items.feedback_items.length ? <div className="item muted">暂无反馈记录。发现旧闻、误抓、标题误导或来源不可靠时，点击对应条目的“反馈不合格”。</div> : null}
           </div>
         </section>
       </div>

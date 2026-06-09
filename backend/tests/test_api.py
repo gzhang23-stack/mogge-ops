@@ -230,11 +230,49 @@ def test_full_operator_smoke_flow():
         assert wechat_article.status_code == 200
         assert wechat_article.json()["imported"] in {0, 1}
 
+        link_inbox = client.post(
+            "/monitors/link-inbox",
+            json={
+                "text": (
+                    f"公众号线索：高校博士科研讨论 {marker} https://mp.weixin.qq.com/s/{marker}\n"
+                    f"抖音线索：研究生导师话题 {marker} https://v.douyin.com/{marker}/\n"
+                    f"小红书线索：博士毕业经验 {marker} https://xhslink.com/{marker}"
+                ),
+                "source_name": "测试报料群",
+                "fetch_metadata": False,
+            },
+        )
+        assert link_inbox.status_code == 200
+        assert link_inbox.json()["created"] == 3
+
+        link_inbox_duplicate = client.post(
+            "/monitors/link-inbox",
+            json={
+                "links": [f"https://mp.weixin.qq.com/s/{marker}"],
+                "source_name": "测试报料群",
+                "fetch_metadata": False,
+            },
+        )
+        assert link_inbox_duplicate.status_code == 200
+        assert link_inbox_duplicate.json()["skipped"] == 1
+
         monitor_items = client.get("/monitors/items")
         assert monitor_items.status_code == 200
         assert "hot_events" in monitor_items.json()
+        assert "social_clues" in monitor_items.json()
         hot_events = [item for item in monitor_items.json()["hot_events"] if marker in item["event_title"]]
         academic_items = [item for item in monitor_items.json()["academic_items"] if marker in item["translated_title"] or marker in item["translated_summary"] or marker in item.get("source_url", "")]
+        social_clues = [item for item in monitor_items.json()["social_clues"] if marker in item["event_title"] or marker in item.get("source_url", "")]
+        assert len(social_clues) == 3
+        assert {item["source_platform"] for item in social_clues} >= {"微信公众号", "抖音", "小红书"}
+        assert any(item["verification_status"] == "time_pending" for item in social_clues)
+        social_feedback = client.post(
+            f"/monitors/social-clues/{social_clues[0]['id']}/feedback",
+            json={"reason": "测试误抓", "note": marker},
+        )
+        assert social_feedback.status_code == 200
+        feedback_items = client.get("/monitors/items")
+        assert any(marker in item.get("note", "") for item in feedback_items.json()["feedback_items"])
         if hot_events:
             converted_hot = client.post(f"/monitors/hot-events/{hot_events[0]['id']}/convert", json={"target_account": "募格学术"})
             assert converted_hot.status_code == 200

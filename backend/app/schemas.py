@@ -110,6 +110,21 @@ class WechatArticleImportRequest(BaseModel):
     items: list[WechatArticleMonitorItem]
 
 
+class LinkInboxRequest(BaseModel):
+    text: str = ""
+    links: list[str] = []
+    source_name: str = "人工报料"
+    published_at: datetime | None = None
+    mark_as_major: bool = False
+    fetch_metadata: bool = True
+
+
+class LinkInboxResponse(BaseModel):
+    created: int
+    skipped: int
+    items: list[dict[str, Any]] = []
+
+
 class MonitorConvertRequest(BaseModel):
     target_account: str | None = None
     column_name: str | None = None

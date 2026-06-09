@@ -375,10 +375,21 @@ def import_wechat_articles(
     return {"imported": count}
 
 
+@router.post("/monitors/link-inbox", response_model=schemas.LinkInboxResponse)
+def import_link_inbox(
+    payload: schemas.LinkInboxRequest,
+    db: Session = Depends(get_db),
+    actor: dict[str, str] = Depends(require_permission("topics:generate")),
+) -> schemas.LinkInboxResponse:
+    result = services.ingest_link_inbox(db, payload, actor["user"])
+    return schemas.LinkInboxResponse(**result)
+
+
 @router.get("/monitors/items")
 def monitor_items(db: Session = Depends(get_db)) -> dict[str, list[dict]]:
     services.ensure_default_monitor_sources(db)
     hot_events, academic = services.monitor_result_candidates(db, 50, 30)
+    social_clues = services.social_clue_candidates(db, 50)
     conversions = db.scalars(select(models.MonitorConversion)).all()
     conversion_map = {(item.item_type, item.item_id): item.topic_id for item in conversions}
     return {
@@ -414,6 +425,27 @@ def monitor_items(db: Session = Depends(get_db)) -> dict[str, list[dict]]:
             }
             for item in academic
         ],
+        "social_clues": [
+            {
+                "id": item.id,
+                "event_title": item.event_title,
+                "heat_index": item.heat_index,
+                "source_platform": item.source_platform,
+                "source_name": item.raw_payload.get("source_name", item.source_platform) if isinstance(item.raw_payload, dict) else item.source_platform,
+                "source_url": item.source_url,
+                "published_at": services.hot_event_published_at(item),
+                "crawled_at": item.created_at,
+                "summary": item.raw_payload.get("summary", "") if isinstance(item.raw_payload, dict) else "",
+                "keywords": item.extracted_keywords,
+                "verification_status": item.raw_payload.get("verification_status", "time_pending") if isinstance(item.raw_payload, dict) else "time_pending",
+                "confidence_level": item.raw_payload.get("confidence_level", "medium") if isinstance(item.raw_payload, dict) else "medium",
+                "confidence_score": item.raw_payload.get("confidence_score", 0) if isinstance(item.raw_payload, dict) else 0,
+                "recommended_action": item.raw_payload.get("recommended_action", "核实") if isinstance(item.raw_payload, dict) else "核实",
+                "mark_as_major": item.raw_payload.get("mark_as_major", False) if isinstance(item.raw_payload, dict) else False,
+            }
+            for item in social_clues
+        ],
+        "feedback_items": services.feedback_items(db, 30),
     }
 
 
@@ -465,7 +497,14 @@ def monitor_feedback(
     db: Session = Depends(get_db),
     actor: dict[str, str] = Depends(require_permission("topics:generate")),
 ) -> dict:
-    normalized = {"hot-events": "hot_event", "hot_event": "hot_event", "academic-items": "academic_item", "academic_item": "academic_item"}.get(item_type)
+    normalized = {
+        "hot-events": "hot_event",
+        "hot_event": "hot_event",
+        "academic-items": "academic_item",
+        "academic_item": "academic_item",
+        "social-clues": "social_clue",
+        "social_clue": "social_clue",
+    }.get(item_type)
     if not normalized:
         raise HTTPException(status_code=400, detail="Unsupported monitor item type")
     try:

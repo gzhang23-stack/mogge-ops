@@ -10,7 +10,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -26,7 +26,7 @@ from app.llm import LLMClient
 from app.notifier import DingTalkNotifier
 from app.schemas import ArticleImportItem
 from app.schemas import MetricImportItem
-from app.schemas import WechatArticleMonitorItem, WechatMonitorAccountItem
+from app.schemas import LinkInboxRequest, WechatArticleMonitorItem, WechatMonitorAccountItem
 from app.wechat_api import WeChatApiError, sync_article_datacube
 
 
@@ -68,6 +68,33 @@ STRICT_CHINESE_NEWS_SOURCES = [
 STRICT_ENGLISH_SOURCES = {"Nature News", "Retraction Watch", "Science News"}
 DOMESTIC_NEWS_WINDOW_HOURS = 24
 ENGLISH_NEWS_WINDOW_HOURS = 72
+SOCIAL_CLUE_CONTENT_TYPE = "social_clue"
+SOCIAL_LINK_RE = re.compile(r"https?://[^\s<>'\"，,。；;）)\]】]+")
+SOCIAL_MONITOR_KEYWORDS = sorted(
+    set(
+        STRICT_CHINESE_MONITOR_KEYWORDS
+        + [
+            "教授",
+            "校长",
+            "大学生",
+            "考研",
+            "保研",
+            "毕业",
+            "实验室",
+            "期刊",
+            "SCI",
+            "博士后",
+            "青椒",
+            "职称",
+            "基金",
+            "投稿",
+            "招聘",
+            "编制",
+            "高校人才",
+            "科研评价",
+        ]
+    )
+)
 
 DEFAULT_MONITOR_SOURCES = [
     # 国内：科学网/中国科学报公开 RSS，适合中文学术新闻、论文、基金和人才高教。
@@ -1037,6 +1064,234 @@ def fetch_wechat_account_items(db: Session, source: models.MonitorSource, limit:
     return fetch_rss_items(proxy_source, limit=limit)
 
 
+def normalize_social_url(url: str) -> str:
+    value = url.strip().strip(" \t\r\n，,。；;）)]】>\"'")
+    if value.startswith("http://") or value.startswith("https://"):
+        return value
+    return ""
+
+
+def extract_social_links(text: str, links: list[str] | None = None) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for raw_url in links or []:
+        url = normalize_social_url(raw_url)
+        if url and url not in seen:
+            rows.append({"url": url, "line_title": ""})
+            seen.add(url)
+    for line in text.splitlines():
+        urls = [normalize_social_url(match.group(0)) for match in SOCIAL_LINK_RE.finditer(line)]
+        urls = [url for url in urls if url]
+        if not urls:
+            continue
+        line_title = line
+        for url in urls:
+            line_title = line_title.replace(url, " ")
+        line_title = re.sub(r"\s+", " ", line_title).strip(" ：:，,。-")
+        for url in urls:
+            if url in seen:
+                continue
+            rows.append({"url": url, "line_title": line_title})
+            seen.add(url)
+    return rows
+
+
+def detect_social_platform(url: str) -> str:
+    host = urlparse(url).netloc.lower()
+    if "mp.weixin.qq.com" in host:
+        return "微信公众号"
+    if "douyin.com" in host:
+        return "抖音"
+    if "xiaohongshu.com" in host or "xhslink.com" in host:
+        return "小红书"
+    if "channels.weixin.qq.com" in host:
+        return "视频号"
+    if "weibo.com" in host:
+        return "微博"
+    if "bilibili.com" in host:
+        return "B站"
+    if "zhihu.com" in host:
+        return "知乎"
+    return "公开链接"
+
+
+def _meta_content(soup: BeautifulSoup, *names: str) -> str:
+    for name in names:
+        node = soup.find("meta", attrs={"property": name}) or soup.find("meta", attrs={"name": name})
+        if node and node.get("content"):
+            return str(node.get("content")).strip()
+    return ""
+
+
+def fetch_public_link_metadata(url: str) -> dict[str, str]:
+    try:
+        with httpx.Client(timeout=6, follow_redirects=True) as client:
+            response = client.get(url, headers={"User-Agent": "MoggeOpsMonitor/0.1"})
+            response.raise_for_status()
+    except Exception:
+        return {"final_url": url}
+    soup = BeautifulSoup(response.text, "html.parser")
+    title = _meta_content(soup, "og:title", "twitter:title")
+    if not title and soup.title and soup.title.string:
+        title = soup.title.string.strip()
+    description = _meta_content(soup, "og:description", "description", "twitter:description")
+    published_at = _meta_content(soup, "article:published_time", "datePublished", "pubdate", "publishdate")
+    site_name = _meta_content(soup, "og:site_name", "application-name")
+    return {
+        "title": re.sub(r"\s+", " ", title).strip(),
+        "summary": re.sub(r"\s+", " ", description).strip(),
+        "published_at": published_at,
+        "source_name": site_name,
+        "final_url": str(response.url),
+    }
+
+
+def exact_url_key(url: str) -> str:
+    return normalize_social_url(url).rstrip("/")
+
+
+def _existing_social_clue(db: Session, url: str) -> bool:
+    key = exact_url_key(url)
+    if not key:
+        return False
+    for row in db.scalars(select(models.ExternalHotEvent).order_by(models.ExternalHotEvent.id.desc()).limit(1000)).all():
+        raw = row.raw_payload if isinstance(row.raw_payload, dict) else {}
+        candidates = [row.source_url, str(raw.get("original_url") or ""), str(raw.get("final_url") or "")]
+        if any(exact_url_key(candidate) == key for candidate in candidates if candidate):
+            return True
+    return False
+
+
+def _social_confidence(hits: list[str], published_at: datetime | None, platform: str) -> tuple[str, float]:
+    score = 0.35
+    if platform != "公开链接":
+        score += 0.12
+    if hits:
+        score += min(0.28, len(hits) * 0.07)
+    if published_at:
+        score += 0.2
+    if platform in {"微信公众号", "抖音", "小红书", "视频号"} and not published_at:
+        score -= 0.08
+    score = max(0.1, min(0.95, score))
+    if score >= 0.72:
+        return "high", score
+    if score >= 0.48:
+        return "medium", score
+    return "low", score
+
+
+def _confidence_label(score: float) -> str:
+    if score >= 0.72:
+        return "high"
+    if score >= 0.48:
+        return "medium"
+    return "low"
+
+
+def social_feedback_adjustment(db: Session, platform: str, source_name: str, hits: list[str]) -> tuple[float, list[str]]:
+    penalty = 0.0
+    signals: list[str] = []
+    hit_set = set(hits)
+    for row in db.scalars(select(models.ExternalHotEvent).order_by(models.ExternalHotEvent.updated_at.desc()).limit(200)).all():
+        raw = row.raw_payload if isinstance(row.raw_payload, dict) else {}
+        if raw.get("content_type") != SOCIAL_CLUE_CONTENT_TYPE or not raw.get("feedback"):
+            continue
+        row_source = str(raw.get("source_name") or "")
+        overlap = hit_set.intersection(set(row.extracted_keywords or []))
+        if row.source_platform == platform:
+            penalty += 0.04
+            signals.append(f"同平台反馈：{platform}")
+        if source_name and row_source == source_name:
+            penalty += 0.06
+            signals.append(f"同来源反馈：{source_name}")
+        if overlap:
+            penalty += 0.04
+            signals.append(f"同关键词反馈：{'、'.join(sorted(overlap))}")
+        if penalty >= 0.25:
+            break
+    return min(0.25, penalty), signals[:3]
+
+
+def ingest_link_inbox(db: Session, payload: LinkInboxRequest, actor: str) -> dict[str, Any]:
+    entries = extract_social_links(payload.text, payload.links)
+    created = 0
+    skipped = 0
+    created_items: list[dict[str, Any]] = []
+    for entry in entries:
+        original_url = entry["url"]
+        if _existing_social_clue(db, original_url):
+            skipped += 1
+            continue
+        metadata = fetch_public_link_metadata(original_url) if payload.fetch_metadata else {"final_url": original_url}
+        final_url = normalize_social_url(metadata.get("final_url") or original_url) or original_url
+        if final_url != original_url and _existing_social_clue(db, final_url):
+            skipped += 1
+            continue
+        platform = detect_social_platform(final_url or original_url)
+        source_name = payload.source_name.strip() or metadata.get("source_name") or platform
+        title = entry.get("line_title") or metadata.get("title") or f"{platform}线索：{urlparse(final_url or original_url).netloc}"
+        title = summarize(title, 120)
+        summary = metadata.get("summary") or "来自公开链接收件箱的社交平台线索，需要人工打开原文核实发布时间和事实。"
+        parsed_published_at = payload.published_at or parse_source_datetime(str(metadata.get("published_at") or ""))
+        text_for_keywords = f"{title} {summary} {platform} {source_name}"
+        hits = keyword_hits(text_for_keywords, SOCIAL_MONITOR_KEYWORDS)
+        confidence_label, confidence_score = _social_confidence(hits, parsed_published_at, platform)
+        feedback_penalty, feedback_signals = social_feedback_adjustment(db, platform, source_name, hits)
+        confidence_score = max(0.1, confidence_score - feedback_penalty)
+        confidence_label = _confidence_label(confidence_score)
+        heat = 45 + min(25, len(hits) * 5)
+        if payload.mark_as_major:
+            heat = max(heat, 90)
+        elif platform in {"微信公众号", "抖音", "小红书", "视频号"}:
+            heat += 5
+        heat = max(20, heat - int(feedback_penalty * 80))
+        event = models.ExternalHotEvent(
+            event_title=title,
+            heat_index=min(100, heat),
+            source_platform=platform,
+            source_url=final_url or original_url,
+            extracted_keywords=hits,
+            raw_payload={
+                "content_type": SOCIAL_CLUE_CONTENT_TYPE,
+                "source_method": "link_inbox",
+                "platform": platform,
+                "source_name": source_name,
+                "original_url": original_url,
+                "final_url": final_url,
+                "summary": summary,
+                "published_at": parsed_published_at.isoformat() if parsed_published_at else None,
+                "crawled_at": datetime.utcnow().isoformat(),
+                "verification_status": "time_verified" if parsed_published_at else "time_pending",
+                "requires_verification": True,
+                "confidence_level": confidence_label,
+                "confidence_score": round(confidence_score, 3),
+                "feedback_penalty": round(feedback_penalty, 3),
+                "feedback_signals": feedback_signals,
+                "mark_as_major": payload.mark_as_major,
+                "recommended_action": "核实" if not parsed_published_at else "关注",
+                "free_monitoring": True,
+            },
+        )
+        db.add(event)
+        db.flush()
+        created += 1
+        created_items.append(
+            {
+                "id": event.id,
+                "title": event.event_title,
+                "platform": platform,
+                "source_url": event.source_url,
+                "published_at": parsed_published_at.isoformat() if parsed_published_at else None,
+                "verification_status": event.raw_payload["verification_status"],
+                "keywords": hits,
+                "confidence_level": confidence_label,
+            }
+        )
+    audit(db, actor, "monitors.link_inbox.import", "external_hot_events", payload={"created": created, "skipped": skipped})
+    db.commit()
+    return {"created": created, "skipped": skipped, "items": created_items}
+
+
 def vectorize(text: str, size: int = 64) -> list[float]:
     vector = [0.0] * size
     tokens = re.findall(r"[\w\u4e00-\u9fff]+", text.lower())
@@ -1691,7 +1946,7 @@ def record_monitor_feedback(db: Session, item_type: str, item_id: int, reason: s
         "actor": actor,
         "created_at": datetime.utcnow().isoformat(),
     }
-    if item_type == "hot_event":
+    if item_type in {"hot_event", "social_clue"}:
         item = db.get(models.ExternalHotEvent, item_id)
         if not item:
             raise ValueError("Hot event not found")
@@ -1860,6 +2115,63 @@ def is_valid_academic_item(item: models.AcademicMonitorItem) -> bool:
     return item.source_platform in STRICT_ENGLISH_SOURCES and within_hours(academic_item_published_at(item), ENGLISH_NEWS_WINDOW_HOURS)
 
 
+def is_social_clue(item: models.ExternalHotEvent) -> bool:
+    raw = item.raw_payload if isinstance(item.raw_payload, dict) else {}
+    return raw.get("content_type") == SOCIAL_CLUE_CONTENT_TYPE
+
+
+def social_clue_candidates(db: Session, limit: int = 30) -> list[models.ExternalHotEvent]:
+    items = [
+        item
+        for item in db.scalars(select(models.ExternalHotEvent).order_by(models.ExternalHotEvent.id.desc()).limit(300)).all()
+        if is_social_clue(item) and not (isinstance(item.raw_payload, dict) and item.raw_payload.get("hidden_by_feedback"))
+    ]
+    items.sort(key=lambda item: (item.heat_index, item.created_at or datetime.min), reverse=True)
+    return items[:limit]
+
+
+def feedback_items(db: Session, limit: int = 30) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in db.scalars(select(models.ExternalHotEvent).order_by(models.ExternalHotEvent.updated_at.desc()).limit(300)).all():
+        raw = item.raw_payload if isinstance(item.raw_payload, dict) else {}
+        feedback = raw.get("feedback")
+        if not isinstance(feedback, dict):
+            continue
+        rows.append(
+            {
+                "item_type": "social_clue" if is_social_clue(item) else "hot_event",
+                "id": item.id,
+                "title": item.event_title,
+                "source": item.source_platform,
+                "source_url": item.source_url,
+                "reason": feedback.get("reason", ""),
+                "note": feedback.get("note", ""),
+                "actor": feedback.get("actor", ""),
+                "created_at": feedback.get("created_at"),
+            }
+        )
+    for item in db.scalars(select(models.AcademicMonitorItem).order_by(models.AcademicMonitorItem.updated_at.desc()).limit(300)).all():
+        raw = getattr(item, "raw_payload", {}) if isinstance(getattr(item, "raw_payload", {}), dict) else {}
+        feedback = raw.get("feedback")
+        if not isinstance(feedback, dict):
+            continue
+        rows.append(
+            {
+                "item_type": "academic_item",
+                "id": item.id,
+                "title": item.translated_title or item.original_title,
+                "source": item.source_platform,
+                "source_url": item.source_url,
+                "reason": feedback.get("reason", ""),
+                "note": feedback.get("note", ""),
+                "actor": feedback.get("actor", ""),
+                "created_at": feedback.get("created_at"),
+            }
+        )
+    rows.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+    return rows[:limit]
+
+
 def format_dt(value: datetime | None) -> str:
     return value.strftime("%Y-%m-%d %H:%M") if value else "未知"
 
@@ -1881,9 +2193,14 @@ def monitor_result_candidates(db: Session, hot_limit: int = 20, academic_limit: 
     return hot_events[:hot_limit], academic_items[:academic_limit]
 
 
-def render_monitor_digest_markdown(hot_events: list[models.ExternalHotEvent], academic_items: list[models.AcademicMonitorItem]) -> str:
-    if not hot_events and not academic_items:
-        return "### 募格监控结果\n\n本轮没有符合硬性条件的新增新闻：中文需命中关键词且发布时间在 24 小时内，英文仅保留 Nature News、Retraction Watch、Science News 的 72 小时内新闻。"
+def render_monitor_digest_markdown(
+    hot_events: list[models.ExternalHotEvent],
+    academic_items: list[models.AcademicMonitorItem],
+    social_clues: list[models.ExternalHotEvent] | None = None,
+) -> str:
+    social_clues = social_clues or []
+    if not hot_events and not academic_items and not social_clues:
+        return "### 募格监控结果\n\n本轮没有符合硬性条件的新增新闻，也没有新的公开链接收件箱线索。"
     lines = ["### 募格监控结果", "", "以下为本轮保留的第一手热点新闻线索，不是 AI 生成选题。", ""]
     if hot_events:
         lines.extend(["#### 中文新闻", ""])
@@ -1917,6 +2234,25 @@ def render_monitor_digest_markdown(hot_events: list[models.ExternalHotEvent], ac
                     "",
                 ]
             )
+    if social_clues:
+        lines.extend(["#### 社交平台线索（待核实）", ""])
+        for idx, item in enumerate(social_clues[:8], start=1):
+            raw = item.raw_payload if isinstance(item.raw_payload, dict) else {}
+            published_at = hot_event_published_at(item)
+            lines.extend(
+                [
+                    f"**{idx}. {item.event_title}**",
+                    f"- 平台：{item.source_platform}",
+                    f"- 来源：{raw.get('source_name') or item.source_platform}",
+                    f"- 发布时间：{format_dt(published_at)}",
+                    f"- 核实状态：{'发布时间待核实' if not published_at else '已解析发布时间，仍需核实事实'}",
+                    f"- 关键词：{'、'.join(item.extracted_keywords) if item.extracted_keywords else '未命中，人工报料待判断'}",
+                    f"- 可信度：{raw.get('confidence_level', 'medium')}",
+                    f"- 推荐动作：{raw.get('recommended_action', '核实')}",
+                    f"- 链接：{item.source_url or '无'}",
+                    "",
+                ]
+            )
     lines.append("> 如发现旧闻、来源错误或不符合关键词，请在后台监控页点“反馈不合格”，系统会记录并隐藏该条。")
     return "\n".join(lines)
 
@@ -1936,6 +2272,19 @@ def push_breaking_news_from_monitors(db: Session, actor: str = "scheduler") -> d
     candidates.extend(
         ("academic_item", item.id, item.translated_title, item.translated_summary, item.source_platform, 70, item.risk_level)
         for item in academic_items
+    )
+    candidates.extend(
+        (
+            "social_clue",
+            item.id,
+            item.event_title,
+            item.raw_payload.get("summary", "") if isinstance(item.raw_payload, dict) else "",
+            item.source_platform,
+            item.heat_index,
+            infer_risk(f"{item.event_title} {' '.join(item.extracted_keywords)}"),
+        )
+        for item in social_clue_candidates(db, 30)
+        if isinstance(item.raw_payload, dict) and item.raw_payload.get("mark_as_major")
     )
     for item_type, item_id, title, summary, source, heat, risk in candidates:
         if _already_pushed(db, item_type, item_id, "breaking"):
@@ -1964,7 +2313,8 @@ def run_monitor_pipeline(db: Session, actor: str = "scheduler") -> dict[str, Any
     hot_count, academic_count = run_monitors(db, [], actor)
     breaking_result = push_breaking_news_from_monitors(db, actor)
     hot_events, academic_items = monitor_result_candidates(db)
-    markdown_text = render_monitor_digest_markdown(hot_events, academic_items)
+    social_clues = social_clue_candidates(db, 10)
+    markdown_text = render_monitor_digest_markdown(hot_events, academic_items, social_clues)
     if automation.push_allowed_now(auto_settings):
         push_result = DingTalkNotifier(auto_settings).send_markdown("募格监控新闻提醒", markdown_text)
     else:
@@ -1977,7 +2327,7 @@ def run_monitor_pipeline(db: Session, actor: str = "scheduler") -> dict[str, Any
         payload={
             "hot_events_created": hot_count,
             "academic_items_created": academic_count,
-            "monitor_items_pushed": len(hot_events) + len(academic_items),
+            "monitor_items_pushed": len(hot_events) + len(academic_items) + len(social_clues),
             "breaking_result": breaking_result,
             "push_result": push_result,
         },
@@ -1988,7 +2338,7 @@ def run_monitor_pipeline(db: Session, actor: str = "scheduler") -> dict[str, Any
         "academic_items_created": academic_count,
         "topics_generated": 0,
         "topics_pushed": 0,
-        "monitor_items_pushed": len(hot_events) + len(academic_items),
+        "monitor_items_pushed": len(hot_events) + len(academic_items) + len(social_clues),
         "breaking_result": breaking_result,
         "push_result": push_result,
     }

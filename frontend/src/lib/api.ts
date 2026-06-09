@@ -187,6 +187,34 @@ export interface MonitorItems {
     status: string;
     topic_id?: number;
   }>;
+  social_clues: Array<{
+    id: number;
+    event_title: string;
+    heat_index: number;
+    source_platform: string;
+    source_name: string;
+    source_url: string;
+    published_at?: string | null;
+    crawled_at?: string | null;
+    summary?: string;
+    keywords: string[];
+    verification_status: string;
+    confidence_level: string;
+    confidence_score: number;
+    recommended_action: string;
+    mark_as_major: boolean;
+  }>;
+  feedback_items: Array<{
+    item_type: string;
+    id: number;
+    title: string;
+    source: string;
+    source_url: string;
+    reason: string;
+    note: string;
+    actor: string;
+    created_at?: string | null;
+  }>;
 }
 
 export interface MonitorSource {
